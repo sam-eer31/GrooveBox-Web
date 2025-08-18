@@ -50,6 +50,7 @@ export default function App(): JSX.Element {
   const channelRef = useRef<ReturnType<NonNullable<typeof supabase>['channel']> | null>(null)
   const clientIdRef = useRef<string>('')
   const isApplyingRemoteRef = useRef<boolean>(false)
+  const pendingRemotePlayRef = useRef<{ index: number; time: number } | null>(null)
 
   // Cleanup local object URLs on unmount
   useEffect(() => {
@@ -190,6 +191,7 @@ export default function App(): JSX.Element {
 
         const loaded: Track[] = []
         for (const f of files) {
+          if (f.name === 'meta.json') continue
           const path = `${prefix}/${f.name}`
           const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
           const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl
@@ -200,6 +202,16 @@ export default function App(): JSX.Element {
         setTracks(loaded)
         setCurrentIndex(loaded.length > 0 ? 0 : -1)
         setCurrentTime(0)
+        // If a remote play was requested before we loaded, apply now
+        if (pendingRemotePlayRef.current && loaded.length > pendingRemotePlayRef.current.index) {
+          const { index, time } = pendingRemotePlayRef.current
+          pendingRemotePlayRef.current = null
+          isApplyingRemoteRef.current = true
+          setCurrentIndex(index)
+          setCurrentTime(time)
+          shouldAutoplayRef.current = true
+          setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+        }
       } finally {
         setIsLoadingLibrary(false)
       }
@@ -411,7 +423,7 @@ export default function App(): JSX.Element {
       const state = ch.presenceState() as Record<string, Array<{ name?: string }>>
       const entries: Array<{ key: string; name: string }> = []
       Object.entries(state).forEach(([key, metas]) => {
-        metas.forEach(() => entries.push({ key, name: '' }))
+        metas.forEach(meta => entries.push({ key, name: meta?.name || 'Guest' }))
       })
       setParticipants(entries)
     })
@@ -430,6 +442,7 @@ export default function App(): JSX.Element {
       const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
       const added: Track[] = []
       for (const it of items) {
+        if (it.name === 'meta.json') continue
         const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(it.path, 60 * 60 * 24 * 7)
         const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(it.path).data.publicUrl
         if (!url) continue
@@ -442,12 +455,17 @@ export default function App(): JSX.Element {
 
     ch.on('broadcast', { event: 'player:play' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
-      isApplyingRemoteRef.current = true
       const { index, time } = payload as { index: number; time: number }
-      setCurrentIndex(index)
-      setCurrentTime(time)
-      shouldAutoplayRef.current = true
-      setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+      // If we don't yet have tracks or the audio isn't ready, stash and apply after load
+      if (tracks.length === 0 || index >= tracks.length) {
+        pendingRemotePlayRef.current = { index, time }
+      } else {
+        isApplyingRemoteRef.current = true
+        setCurrentIndex(index)
+        setCurrentTime(time)
+        shouldAutoplayRef.current = true
+        setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+      }
     })
 
     ch.on('broadcast', { event: 'player:pause' }, ({ payload }) => {
@@ -625,6 +643,11 @@ export default function App(): JSX.Element {
             <div className="text-sm text-slate-400">You: <span className="font-medium text-slate-200">{displayName || 'Guest'}</span></div>
             <div className="text-sm text-slate-400">Participants: <span className="font-medium text-slate-200">{participants.length + 1}</span></div>
           </div>
+          {participants.length > 0 && (
+            <div className="mt-2 text-xs text-slate-400">
+              {participants.map(p => p.name).join(', ')}
+            </div>
+          )}
           {toast && <div className="mt-2 text-xs text-slate-300">{toast}</div>}
           <div
             onDrop={onDrop}
