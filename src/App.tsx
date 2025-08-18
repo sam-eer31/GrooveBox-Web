@@ -438,6 +438,10 @@ export default function App(): JSX.Element {
         await supabase.storage.from(bucket).upload(`rooms/${roomCode}/.tomb`, tomb, { upsert: true })
         await supabase.storage.from(bucket).remove([`rooms/${roomCode}/.tomb`])
       } catch {}
+      // Finally, remove meta.json explicitly in case it was cached/generated late
+      try {
+        await supabase.storage.from(bucket).remove([`rooms/${roomCode}/meta.json`])
+      } catch {}
     } catch {}
     if (channelRef.current) {
       channelRef.current.send({ type: 'broadcast', event: 'room:ended', payload: { sender: clientIdRef.current } })
@@ -682,6 +686,10 @@ export default function App(): JSX.Element {
 
     ch.on('broadcast', { event: 'room:ended' }, () => {
       cleanupRoomState()
+      try {
+        localStorage.removeItem('groovebox_room')
+        localStorage.removeItem('groovebox_is_host')
+      } catch {}
     })
 
     ch.subscribe(async (status) => {
@@ -698,19 +706,32 @@ export default function App(): JSX.Element {
     }
   }, [inRoom, roomCode])
 
-  // Restore session on first render
+  // Restore session on first render, but only if room still exists
   useEffect(() => {
-    try {
-      const savedRoom = localStorage.getItem('groovebox_room') || ''
-      const savedName = localStorage.getItem('groovebox_name') || ''
-      const savedHost = localStorage.getItem('groovebox_is_host') || '0'
-      if (savedName) setDisplayName(savedName)
-      if (savedRoom) {
-        setRoomCode(savedRoom)
-        setInRoom(true)
-        setIsHost(savedHost === '1')
-      }
-    } catch {}
+    const restore = async () => {
+      try {
+        const savedRoom = localStorage.getItem('groovebox_room') || ''
+        const savedName = localStorage.getItem('groovebox_name') || ''
+        const savedHost = localStorage.getItem('groovebox_is_host') || '0'
+        if (savedName) setDisplayName(savedName)
+        if (savedRoom && supabase) {
+          const exists = await roomExists(savedRoom)
+          if (exists) {
+            setRoomCode(savedRoom)
+            setInRoom(true)
+            setIsHost(savedHost === '1')
+          } else {
+            try {
+              localStorage.removeItem('groovebox_room')
+              localStorage.removeItem('groovebox_is_host')
+            } catch {}
+            setInRoom(false)
+            setIsHost(false)
+          }
+        }
+      } catch {}
+    }
+    void restore()
   }, [])
 
   // Render based on state; hooks above are unconditional to preserve order
