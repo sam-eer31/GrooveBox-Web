@@ -25,6 +25,10 @@ function formatTime(seconds: number): string {
 }
 
 export default function App(): JSX.Element {
+  const [roomCode, setRoomCode] = useState<string>('')
+  const [joinCodeInput, setJoinCodeInput] = useState<string>('')
+  const [inRoom, setInRoom] = useState<boolean>(false)
+  const [isHost, setIsHost] = useState<boolean>(false)
   const [tracks, setTracks] = useState<Track[]>([])
   const [currentIndex, setCurrentIndex] = useState<number>(-1)
   const [error, setError] = useState<string | null>(null)
@@ -34,10 +38,16 @@ export default function App(): JSX.Element {
   const [volume, setVolume] = useState(1)
   const [isUploading, setIsUploading] = useState(false)
   const [isLoadingLibrary, setIsLoadingLibrary] = useState(false)
+  const [displayName, setDisplayName] = useState<string>('')
+  const [roomTitle, setRoomTitle] = useState<string>('')
+  const [roomTitleInput, setRoomTitleInput] = useState<string>('')
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const shouldAutoplayRef = useRef<boolean>(false)
+  const channelRef = useRef<ReturnType<NonNullable<typeof supabase>['channel']> | null>(null)
+  const clientIdRef = useRef<string>('')
+  const isApplyingRemoteRef = useRef<boolean>(false)
 
   // Cleanup local object URLs on unmount
   useEffect(() => {
@@ -63,6 +73,10 @@ export default function App(): JSX.Element {
       setError('Supabase is not configured. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY, then restart the dev server.')
       return
     }
+    if (!inRoom || !roomCode) {
+      setError('Join or create a room before uploading.')
+      return
+    }
     const accepted: File[] = []
     let unsupported = 0
     for (let i = 0; i < files.length; i++) {
@@ -86,7 +100,7 @@ export default function App(): JSX.Element {
     try {
       const uploadedTracks: Track[] = []
       for (const file of accepted) {
-        const path = `uploads/${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}-${file.name}`
+        const path = `rooms/${roomCode}/${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}-${file.name}`
         const { error: upErr } = await supabase.storage.from(bucket).upload(path, file, {
           contentType: file.type || 'audio/mpeg',
           upsert: false
@@ -134,51 +148,54 @@ export default function App(): JSX.Element {
         })
         setIsPlaying(false)
         setCurrentTime(0)
+        if (channelRef.current) {
+          const payload = uploadedTracks.map(t => ({ path: t.path, name: t.name }))
+          channelRef.current.send({ type: 'broadcast', event: 'playlist:add', payload: { items: payload, sender: clientIdRef.current } })
+        }
       }
     } finally {
       setIsUploading(false)
     }
   }
 
-  // Load existing songs from Supabase on mount so playlist persists
+  // Load existing songs for the current room
   useEffect(() => {
     const loadFromSupabase = async () => {
-      if (!supabase) return
+      if (!supabase || !inRoom || !roomCode) return
       const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
       setIsLoadingLibrary(true)
       try {
-        const { data: files, error: listErr } = await supabase.storage.from(bucket).list('uploads', {
+        const prefix = `rooms/${roomCode}`
+        const { data: files, error: listErr } = await supabase.storage.from(bucket).list(prefix, {
           limit: 100,
           sortBy: { column: 'name', order: 'asc' }
         })
         if (listErr) return
-        if (!files || files.length === 0) return
+        if (!files || files.length === 0) {
+          setTracks([])
+          setCurrentIndex(-1)
+          return
+        }
 
         const loaded: Track[] = []
         for (const f of files) {
-          const path = `uploads/${f.name}`
-          const { data: signed, error: signErr } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
-          if (signErr || !signed?.signedUrl) {
-            const { data: pub } = supabase.storage.from(bucket).getPublicUrl(path)
-            if (pub?.publicUrl) loaded.push({ id: path, url: pub.publicUrl, name: f.name, path })
-          } else {
-            loaded.push({ id: path, url: signed.signedUrl, name: f.name, path })
-          }
+          const path = `${prefix}/${f.name}`
+          const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
+          const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl
+          if (!url) continue
+          loaded.push({ id: path, url, name: f.name, path })
         }
 
-        if (loaded.length > 0) {
-          setTracks(loaded)
-          setCurrentIndex(0)
-          setCurrentTime(0)
-        }
+        setTracks(loaded)
+        setCurrentIndex(loaded.length > 0 ? 0 : -1)
+        setCurrentTime(0)
       } finally {
         setIsLoadingLibrary(false)
       }
     }
 
     loadFromSupabase()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [inRoom, roomCode])
 
   const onDrop: React.DragEventHandler<HTMLDivElement> = (e) => {
     e.preventDefault()
@@ -198,12 +215,18 @@ export default function App(): JSX.Element {
       try {
         await audio.play()
         setIsPlaying(true)
+        if (channelRef.current) {
+          channelRef.current.send({ type: 'broadcast', event: 'player:play', payload: { index: Math.max(0, currentIndex), time: audio.currentTime, sender: clientIdRef.current } })
+        }
       } catch (err) {
         setError('Unable to play the audio in this browser.')
       }
     } else {
       audio.pause()
       setIsPlaying(false)
+      if (channelRef.current) {
+        channelRef.current.send({ type: 'broadcast', event: 'player:pause', payload: { time: audio.currentTime, sender: clientIdRef.current } })
+      }
     }
   }
 
@@ -232,6 +255,9 @@ export default function App(): JSX.Element {
     if (!audio) return
     audio.currentTime = value
     setCurrentTime(value)
+    if (channelRef.current) {
+      channelRef.current.send({ type: 'broadcast', event: 'player:seek', payload: { time: value, sender: clientIdRef.current } })
+    }
   }
 
   const currentTrack = tracks[currentIndex] ?? null
@@ -245,6 +271,9 @@ export default function App(): JSX.Element {
     setCurrentIndex(idx => Math.max(0, idx - 1))
     setCurrentTime(0)
     shouldAutoplayRef.current = true
+    if (channelRef.current) {
+      channelRef.current.send({ type: 'broadcast', event: 'player:previous', payload: { sender: clientIdRef.current } })
+    }
   }
 
   const goNext = () => {
@@ -252,6 +281,9 @@ export default function App(): JSX.Element {
     setCurrentIndex(idx => Math.min(tracks.length - 1, idx + 1))
     setCurrentTime(0)
     shouldAutoplayRef.current = true
+    if (channelRef.current) {
+      channelRef.current.send({ type: 'broadcast', event: 'player:next', payload: { sender: clientIdRef.current } })
+    }
   }
 
   // When metadata loads for a new track, autoplay if flagged
@@ -269,6 +301,206 @@ export default function App(): JSX.Element {
     return () => audio.removeEventListener('loadedmetadata', handleLoaded)
   }, [currentTrack?.url])
 
+  const cleanupRoomState = () => {
+    setInRoom(false)
+    setIsHost(false)
+    setRoomCode('')
+    setTracks([])
+    setCurrentIndex(-1)
+    setIsPlaying(false)
+    setCurrentTime(0)
+  }
+
+  const endRoom = async () => {
+    if (!isHost || !supabase || !roomCode) return
+    const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
+    try {
+      const { data: files } = await supabase.storage.from(bucket).list(`rooms/${roomCode}`, { limit: 100 })
+      const paths = (files || []).map(f => `rooms/${roomCode}/${f.name}`)
+      if (paths.length > 0) await supabase.storage.from(bucket).remove(paths)
+    } catch {}
+    if (channelRef.current) {
+      channelRef.current.send({ type: 'broadcast', event: 'room:ended', payload: { sender: clientIdRef.current } })
+    }
+    cleanupRoomState()
+  }
+
+  useEffect(() => {
+    const handler = () => {
+      if (isHost) void endRoom()
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [isHost, roomCode])
+
+  const generateRoomCode = () => {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+    let code = ''
+    for (let i = 0; i < 6; i++) code += alphabet[Math.floor(Math.random() * alphabet.length)]
+    return code
+  }
+
+  const createRoom = async () => {
+    if (!supabase) { setError('Supabase not configured'); return }
+    if (!displayName.trim()) { setError('Please enter your name'); return }
+    const code = generateRoomCode()
+    setRoomCode(code)
+    setIsHost(true)
+    setInRoom(true)
+    try {
+      const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
+      const meta = { roomName: roomTitleInput.trim(), hostName: displayName.trim(), createdAt: new Date().toISOString() }
+      const metaBlob = new Blob([JSON.stringify(meta)], { type: 'application/json' })
+      await supabase.storage.from(bucket).upload(`rooms/${code}/meta.json`, metaBlob, { upsert: true, cacheControl: 'no-cache' })
+      setRoomTitle(meta.roomName || '')
+    } catch {}
+  }
+
+  const joinRoom = async () => {
+    if (!supabase) { setError('Supabase not configured'); return }
+    const code = joinCodeInput.trim().toUpperCase()
+    if (!displayName.trim()) { setError('Please enter your name'); return }
+    if (!code) return
+    setRoomCode(code)
+    setIsHost(false)
+    setInRoom(true)
+  }
+
+  // Realtime: subscribe to room events (must be before any early return)
+  useEffect(() => {
+    if (!inRoom || !roomCode || !supabase) return
+    if (!clientIdRef.current) clientIdRef.current = crypto.randomUUID?.() || Math.random().toString(36).slice(2)
+
+    const ch = supabase.channel(`room-${roomCode}`, { config: { broadcast: { self: false } } })
+
+    ch.on('broadcast', { event: 'playlist:add' }, async ({ payload }) => {
+      if (!payload || payload.sender === clientIdRef.current) return
+      const items = (payload.items as Array<{ path: string; name: string }>) || []
+      const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
+      const added: Track[] = []
+      for (const it of items) {
+        const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(it.path, 60 * 60 * 24 * 7)
+        const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(it.path).data.publicUrl
+        if (!url) continue
+        added.push({ id: it.path, url, name: it.name, path: it.path })
+      }
+      if (added.length > 0) {
+        setTracks(prev => [...prev, ...added])
+      }
+    })
+
+    ch.on('broadcast', { event: 'player:play' }, ({ payload }) => {
+      if (!payload || payload.sender === clientIdRef.current) return
+      isApplyingRemoteRef.current = true
+      const { index, time } = payload as { index: number; time: number }
+      setCurrentIndex(index)
+      setCurrentTime(time)
+      shouldAutoplayRef.current = true
+      setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+    })
+
+    ch.on('broadcast', { event: 'player:pause' }, ({ payload }) => {
+      if (!payload || payload.sender === clientIdRef.current) return
+      isApplyingRemoteRef.current = true
+      const { time } = payload as { time: number }
+      const audio = audioRef.current
+      if (audio) {
+        audio.pause()
+        audio.currentTime = time
+      }
+      setIsPlaying(false)
+      setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+    })
+
+    ch.on('broadcast', { event: 'player:seek' }, ({ payload }) => {
+      if (!payload || payload.sender === clientIdRef.current) return
+      const { time } = payload as { time: number }
+      isApplyingRemoteRef.current = true
+      const audio = audioRef.current
+      if (audio) audio.currentTime = time
+      setCurrentTime(time)
+      setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+    })
+
+    ch.on('broadcast', { event: 'player:next' }, () => {
+      isApplyingRemoteRef.current = true
+      goNext()
+      setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+    })
+
+    ch.on('broadcast', { event: 'player:previous' }, () => {
+      isApplyingRemoteRef.current = true
+      goPrevious()
+      setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+    })
+
+    ch.on('broadcast', { event: 'player:select' }, ({ payload }) => {
+      if (!payload || payload.sender === clientIdRef.current) return
+      const { index } = payload as { index: number }
+      isApplyingRemoteRef.current = true
+      setCurrentIndex(index)
+      setCurrentTime(0)
+      shouldAutoplayRef.current = true
+      setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+    })
+
+    ch.on('broadcast', { event: 'room:ended' }, () => {
+      cleanupRoomState()
+    })
+
+    ch.subscribe()
+    channelRef.current = ch
+
+    return () => {
+      ch.unsubscribe()
+      channelRef.current = null
+    }
+  }, [inRoom, roomCode])
+
+  // Render based on state; hooks above are unconditional to preserve order
+  if (!inRoom) {
+    return (
+      <div className="min-h-full flex flex-col">
+        <header className="p-6 md:p-8">
+          <div className="max-w-3xl mx-auto flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="h-8 w-8 rounded-md bg-brand-500/20 ring-1 ring-brand-500/30 grid place-items-center">
+                <span className="text-brand-500 font-bold">♪</span>
+              </div>
+              <h1 className="text-xl font-semibold tracking-tight">GrooveBox Rooms</h1>
+            </div>
+          </div>
+        </header>
+        <main className="flex-1">
+          <div className="max-w-md mx-auto px-6 md:px-8">
+            <div className="bg-slate-800/60 rounded-xl p-6 ring-1 ring-white/5">
+              <h2 className="font-semibold">Listen together</h2>
+              <p className="mt-1 text-sm text-slate-400">Create a room or join with a code.</p>
+              <div className="mt-6 grid gap-4">
+                <div className="grid gap-2">
+                  <label className="text-xs text-slate-400">Your Name</label>
+                  <input value={displayName} onChange={(e)=>setDisplayName(e.currentTarget.value)} placeholder="e.g. Alex" className="rounded-md bg-slate-900 border border-slate-700 px-3 py-2 outline-none focus:border-brand-500/60" />
+                </div>
+                <div className="grid gap-2">
+                  <label className="text-xs text-slate-400">Room Name (optional for host)</label>
+                  <input value={roomTitleInput} onChange={(e)=>setRoomTitleInput(e.currentTarget.value)} placeholder="e.g. Friday Jam" className="rounded-md bg-slate-900 border border-slate-700 px-3 py-2 outline-none focus:border-brand-500/60" />
+                </div>
+                <button onClick={createRoom} className="rounded-md bg-brand-500 text-slate-900 font-medium px-4 py-2">Create Room</button>
+                <div className="flex gap-2">
+                  <input value={joinCodeInput} onChange={(e)=>setJoinCodeInput(e.currentTarget.value)} placeholder="Enter room code" className="flex-1 rounded-md bg-slate-900 border border-slate-700 px-3 py-2 outline-none focus:border-brand-500/60" />
+                  <button onClick={joinRoom} className="rounded-md border border-slate-700 px-4 py-2 hover:border-brand-500/60">Join</button>
+                </div>
+                {error && <p className="text-sm text-red-400">{error}</p>}
+              </div>
+            </div>
+          </div>
+        </main>
+        <footer className="px-6 md:px-8 py-8 text-center text-xs text-slate-500">Built with React, Vite, and Tailwind</footer>
+      </div>
+    )
+  }
+  
+
   return (
     <div className="min-h-full flex flex-col">
       <header className="p-6 md:p-8">
@@ -277,7 +509,10 @@ export default function App(): JSX.Element {
             <div className="h-8 w-8 rounded-md bg-brand-500/20 ring-1 ring-brand-500/30 grid place-items-center">
               <span className="text-brand-500 font-bold">♪</span>
             </div>
-            <h1 className="text-xl font-semibold tracking-tight">GrooveBox</h1>
+            <div>
+              <h1 className="text-xl font-semibold tracking-tight">GrooveBox</h1>
+              <p className="text-xs text-slate-400">Room: <span className="font-mono">{roomCode}</span> {isHost && <span className="ml-2 text-brand-500">(Host)</span>} {roomTitle && <span className="ml-2">· {roomTitle}</span>}</p>
+            </div>
           </div>
 
           <button
@@ -294,6 +529,9 @@ export default function App(): JSX.Element {
             className="hidden"
             onChange={(e) => onFiles(e.currentTarget.files)}
           />
+          {isHost && (
+            <button onClick={endRoom} className="ml-3 rounded-md border border-red-500/60 text-red-300 px-4 py-2 hover:bg-red-500/10">End Room</button>
+          )}
         </div>
       </header>
 
@@ -344,6 +582,9 @@ export default function App(): JSX.Element {
                             setCurrentIndex(idx)
                             setCurrentTime(0)
                             shouldAutoplayRef.current = true
+                            if (channelRef.current) {
+                              channelRef.current.send({ type: 'broadcast', event: 'player:select', payload: { index: idx, sender: clientIdRef.current } })
+                            }
                           }}
                         >
                           <div className="flex items-center gap-3">
