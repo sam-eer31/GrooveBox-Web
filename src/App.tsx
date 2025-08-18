@@ -59,6 +59,7 @@ export default function App(): JSX.Element {
   const [toast, setToast] = useState<string | null>(null)
   const [playbackBlocked, setPlaybackBlocked] = useState<boolean>(false)
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('groovebox_theme') as 'light' | 'dark') || 'dark')
+  const [isUploadOpen, setIsUploadOpen] = useState<boolean>(false)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -100,6 +101,14 @@ export default function App(): JSX.Element {
       root.classList.remove('dark')
     }
   }, [theme])
+
+  // Close upload modal on Escape
+  useEffect(() => {
+    if (!isUploadOpen) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setIsUploadOpen(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [isUploadOpen])
 
   const onFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return
@@ -921,13 +930,12 @@ export default function App(): JSX.Element {
             className="sr-only"
             onChange={(e) => onFiles(e.currentTarget.files)}
           />
-          <label
-            htmlFor="file-input"
-            className="btn-primary cursor-pointer hidden sm:inline-flex"
-            onClick={() => { if (inputRef.current) inputRef.current.value = '' }}
+          <button
+            className="btn-primary hidden sm:inline-flex"
+            onClick={() => setIsUploadOpen(true)}
           >
             <UploadIcon className="h-4 w-4" /> Upload
-          </label>
+          </button>
 
           <div className="ml-2 hidden sm:flex items-center gap-2">
             {isHost ? (
@@ -972,43 +980,21 @@ export default function App(): JSX.Element {
 
           <div className="grid lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2">
-              <div
-                onDrop={onDrop}
-                onDragOver={onDragOver}
-                className="panel p-6 text-center border-2 border-dashed border-black/20 dark:border-white/20 hover:border-brand-500/60 transition"
-              >
-                <p className="text-black/70 dark:text-white/70">Drag and drop songs here, or</p>
-                <label
-                  htmlFor="file-input"
-                  className="mt-3 inline-flex btn-outline cursor-pointer"
-                  onClick={() => { if (inputRef.current) inputRef.current.value = '' }}
-                >
-                  Choose Files
-                </label>
-                {isUploading && (
-                  <p className="mt-4 text-sm text-black/70 dark:text-white/70">Uploading...</p>
-                )}
-                {isLoadingLibrary && (
-                  <p className="mt-2 text-sm text-black/60 dark:text-white/60">Loading your library…</p>
-                )}
-                {error && (
-                  <p className="mt-2 text-sm text-red-500">{error}</p>
-                )}
-              </div>
+              {/* Upload area moved to modal */}
 
-              <div className="mt-6 card p-6 md:p-7 shadow-soft">
-                <div className="flex items-center gap-5">
-                  <div className="h-16 w-16 md:h-20 md:w-20 rounded-lg bg-gradient-to-br from-brand-500/30 to-white/10 grid place-items-center ring-1 ring-white/10">
+              <div className="mt-6 card p-5 sm:p-6 md:p-7 shadow-soft">
+                <div className="flex flex-col sm:flex-row items-center gap-4 sm:gap-5">
+                  <div className="h-14 w-14 sm:h-16 sm:w-16 md:h-20 md:w-20 rounded-lg bg-gradient-to-br from-brand-500/30 to-white/10 grid place-items-center ring-1 ring-white/10 shrink-0">
                     <Music className="h-7 w-7 text-brand-500" />
                   </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[11px] uppercase tracking-wide text-black/60 dark:text-white/60">Now Playing</p>
-                    <h2 className="mt-1 text-lg md:text-xl font-semibold truncate" title={fileName}>{fileName}</h2>
-                    <div className="mt-3 flex items-center justify-center gap-3">
+                  <div className="min-w-0 flex-1 w-full">
+                    <p className="text-[11px] uppercase tracking-wide text-black/60 dark:text-white/60 text-center sm:text-left">Now Playing</p>
+                    <h2 className="mt-1 text-base sm:text-lg md:text-xl font-semibold truncate text-center sm:text-left" title={fileName}>{fileName}</h2>
+                    <div className="mt-3 flex items-center justify-center gap-2 sm:gap-3 flex-wrap">
                       <button
                         onClick={goPrevious}
                         disabled={!hasPrevious}
-                        className="icon-btn h-10 w-10 rounded-full"
+                        className="icon-btn h-9 w-9 sm:h-10 sm:w-10 rounded-full"
                         aria-label="Previous"
                       >
                         <SkipBack className="h-4 w-4" />
@@ -1016,7 +1002,7 @@ export default function App(): JSX.Element {
                       <button
                         onClick={togglePlay}
                         disabled={!currentTrack}
-                        className="inline-flex items-center justify-center h-12 w-12 rounded-full bg-brand-500 text-black hover:brightness-110 disabled:opacity-50"
+                        className="inline-flex items-center justify-center h-11 w-11 sm:h-12 sm:w-12 rounded-full bg-brand-500 text-black hover:brightness-110 disabled:opacity-50"
                         aria-label={isPlaying ? 'Pause' : 'Play'}
                       >
                         {isPlaying ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6" />}
@@ -1024,14 +1010,14 @@ export default function App(): JSX.Element {
                       <button
                         onClick={goNext}
                         disabled={!hasNext}
-                        className="icon-btn h-10 w-10 rounded-full"
+                        className="icon-btn h-9 w-9 sm:h-10 sm:w-10 rounded-full"
                         aria-label="Next"
                       >
                         <SkipForward className="h-4 w-4" />
                       </button>
                     </div>
                   </div>
-                  <div className="hidden md:flex items-center gap-2 w-44">
+                  <div className="hidden md:flex items-center gap-2 w-44 shrink-0">
                     <Volume2 className="h-4 w-4 text-black/60 dark:text-white/60" />
                     <input
                       type="range"
@@ -1052,7 +1038,7 @@ export default function App(): JSX.Element {
                     step={0.1}
                     value={currentTime}
                     onChange={(e) => onSeek(Number(e.currentTarget.value))}
-                    className="w-full accent-brand-500"
+                    className="w-full accent-brand-500 touch-pan-x"
                     disabled={!currentTrack}
                   />
                   <div className="mt-1 flex justify-between text-[11px] text-black/60 dark:text-white/60">
@@ -1068,7 +1054,7 @@ export default function App(): JSX.Element {
                       step={0.01}
                       value={volume}
                       onChange={(e) => setVolume(Number(e.currentTarget.value))}
-                      className="w-2/3 accent-brand-500"
+                      className="w-full max-w-[260px] accent-brand-500"
                     />
                   </div>
                 </div>
@@ -1137,13 +1123,12 @@ export default function App(): JSX.Element {
               </div>
 
               <div className="mt-4 sm:hidden">
-                <label
-                  htmlFor="file-input"
-                  className="btn-primary w-full text-center cursor-pointer"
-                  onClick={() => { if (inputRef.current) inputRef.current.value = '' }}
+                <button
+                  className="btn-primary w-full text-center"
+                  onClick={() => setIsUploadOpen(true)}
                 >
                   <UploadIcon className="h-4 w-4 mr-2" /> Upload
-                </label>
+                </button>
                 <div className="mt-2 flex gap-2">
                   {isHost ? (
                     <button onClick={endRoom} className="btn-outline border-red-500/60 text-red-500 hover:bg-red-500/10 w-full">End Room</button>
@@ -1160,6 +1145,50 @@ export default function App(): JSX.Element {
       <footer className="container-pro py-8 text-center text-xs text-black/60 dark:text-white/60">
         Built with React, Vite, and Tailwind · Plays locally in your browser
       </footer>
+
+      {/* Upload Modal */}
+      {isUploadOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="absolute inset-0 bg-black/60" onClick={() => setIsUploadOpen(false)} />
+          <div className="relative w-full max-w-lg card p-6 md:p-7">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-semibold">Upload Tracks</h2>
+              <button className="icon-btn" onClick={() => setIsUploadOpen(false)} aria-label="Close">✕</button>
+            </div>
+            <div
+              onDrop={(e)=>{ onDrop(e); setIsUploadOpen(false) }}
+              onDragOver={onDragOver}
+              className="mt-4 panel p-6 text-center border-2 border-dashed border-black/20 dark:border-white/20 hover:border-brand-500/60 transition"
+            >
+              <p className="text-black/70 dark:text-white/70">Drag and drop songs here</p>
+              <p className="mt-1 text-[11px] text-black/50 dark:text-white/50">MP3, WAV, M4A, AAC</p>
+              <div className="mt-4 flex flex-col sm:flex-row gap-2 justify-center">
+                <label
+                  htmlFor="file-input"
+                  className="btn-outline cursor-pointer"
+                  onClick={() => { if (inputRef.current) inputRef.current.value = '' }}
+                >
+                  Choose Files
+                </label>
+                <button className="btn-ghost" onClick={() => setIsUploadOpen(false)}>Cancel</button>
+              </div>
+              {isUploading && (
+                <p className="mt-4 text-sm text-black/70 dark:text-white/70">Uploading...</p>
+              )}
+              {isLoadingLibrary && (
+                <p className="mt-2 text-sm text-black/60 dark:text-white/60">Loading your library…</p>
+              )}
+              {error && (
+                <p className="mt-2 text-sm text-red-500">{error}</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
