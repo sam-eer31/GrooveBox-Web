@@ -96,7 +96,8 @@ export default function App(): JSX.Element {
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
       const lowerName = file.name.toLowerCase()
-      const isAccepted = ACCEPTED_TYPES.includes(file.type)
+      const type = file.type || ''
+      const isAccepted = ACCEPTED_TYPES.includes(type)
         || lowerName.endsWith('.mp3')
         || lowerName.endsWith('.wav')
         || lowerName.endsWith('.m4a')
@@ -312,6 +313,24 @@ export default function App(): JSX.Element {
   const onLoadedMetadata: React.ReactEventHandler<HTMLAudioElement> = (e) => {
     const el = e.currentTarget
     setDuration(el.duration)
+    // If a local action requested autoplay, honor it immediately
+    if (shouldAutoplayRef.current) {
+      shouldAutoplayRef.current = false
+      void playCurrent()
+    }
+    // Apply any pending remote play now that metadata is ready
+    if (pendingRemotePlayRef.current) {
+      const { index, time } = pendingRemotePlayRef.current
+      pendingRemotePlayRef.current = null
+      try {
+        el.currentTime = time
+        void el.play()
+        setIsPlaying(true)
+      } catch {
+        setPlaybackBlocked(true)
+        pendingRemotePlayRef.current = { index, time }
+      }
+    }
   }
 
   const onTimeUpdate: React.ReactEventHandler<HTMLAudioElement> = (e) => {
@@ -753,6 +772,7 @@ export default function App(): JSX.Element {
             ref={inputRef}
             type="file"
             accept="audio/*"
+            capture
             multiple
             className="sr-only"
             onChange={(e) => onFiles(e.currentTarget.files)}
@@ -836,7 +856,11 @@ export default function App(): JSX.Element {
                             setCurrentIndex(idx)
                             setCurrentTime(0)
                             shouldAutoplayRef.current = true
-                            // Broadcast selection + play for all
+                            // Try immediate local play; broadcast for others regardless
+                            const audio = audioRef.current
+                            if (audio) {
+                              try { audio.currentTime = 0; void audio.play(); setIsPlaying(true) } catch { setPlaybackBlocked(true) }
+                            }
                             if (channelRef.current) {
                               channelRef.current.send({ type: 'broadcast', event: 'player:select', payload: { index: idx, sender: clientIdRef.current } })
                               channelRef.current.send({ type: 'broadcast', event: 'player:play', payload: { index: idx, time: 0, sender: clientIdRef.current } })
