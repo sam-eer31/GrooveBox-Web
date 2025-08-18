@@ -322,6 +322,10 @@ export default function App(): JSX.Element {
             })
 
             // Get upload URL from Supabase
+            if (!supabase) {
+              resolve({ error: new Error('Supabase client not available') })
+              return
+            }
             supabase.storage.from(bucket).createSignedUploadUrl(path).then(({ data, error }) => {
               // Check if cancelled before starting upload
               if (uploadCancelRef.current) {
@@ -919,6 +923,82 @@ export default function App(): JSX.Element {
       }
     })
 
+    // Mobile backgrounding detection and reconnection
+    let isPageVisible = true
+    let reconnectTimeout: NodeJS.Timeout | null = null
+    
+    const handleVisibilityChange = () => {
+      const wasVisible = isPageVisible
+      isPageVisible = !document.hidden
+      
+      if (wasVisible && !isPageVisible) {
+        // Page went to background - mark as potentially disconnected
+        console.log('Page went to background - may lose connection')
+      } else if (!wasVisible && isPageVisible) {
+        // Page came back to foreground - check connection and reconnect if needed
+        console.log('Page came back to foreground - checking connection')
+        
+        // Clear any existing reconnect timeout
+        if (reconnectTimeout) {
+          clearTimeout(reconnectTimeout)
+          reconnectTimeout = null
+        }
+        
+        // Check if we're still connected to the channel
+        console.log('Page came back to foreground - checking connection')
+        
+        // Try to reconnect if needed
+        ch.subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            console.log('Successfully reconnected to room')
+            addToast('Reconnected to room!', 'success')
+            
+            // Request current player state from host
+            if (!isHost) {
+              ch.send({
+                type: 'broadcast',
+                event: 'player:request_state',
+                payload: { sender: clientIdRef.current }
+              })
+            }
+          } else if (status === 'CLOSED') {
+            console.log('Channel closed, attempting to reconnect...')
+            addToast('Connection lost, reconnecting...', 'warning')
+          }
+        })
+        
+        // Always request current state to sync up
+        if (!isHost) {
+          ch.send({
+            type: 'broadcast',
+            event: 'player:request_state',
+            payload: { sender: clientIdRef.current }
+          })
+        }
+      }
+    }
+
+    // Listen for page visibility changes
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    
+    // Also listen for page focus/blur events as backup
+    const handleFocus = () => {
+      if (!isPageVisible) {
+        isPageVisible = true
+        handleVisibilityChange()
+      }
+    }
+    
+    const handleBlur = () => {
+      if (isPageVisible) {
+        isPageVisible = false
+        handleVisibilityChange()
+      }
+    }
+    
+    window.addEventListener('focus', handleFocus)
+    window.addEventListener('blur', handleBlur)
+
     // Presence: track participants
     ch.on('presence', { event: 'sync' }, () => {
       const state = ch.presenceState() as Record<string, Array<{ name?: string }>>
@@ -1068,6 +1148,102 @@ export default function App(): JSX.Element {
       } catch {}
     })
 
+    // Handle state requests from reconnecting users
+    ch.on('broadcast', { event: 'player:request_state' }, ({ payload }) => {
+      if (!payload || payload.sender === clientIdRef.current) return
+      // Only host responds to state requests
+      if (!isHost) return
+      
+      // Send current player state to the requesting user
+      const currentTrack = tracksRef.current[currentIndexRef.current]
+      if (currentTrack) {
+                 ch.send({
+           type: 'broadcast',
+           event: 'player:state_response',
+           payload: {
+             index: currentIndexRef.current,
+             time: currentTime,
+             isPlaying: isPlaying,
+             sender: clientIdRef.current,
+             target: payload.sender
+           }
+         })
+      }
+    })
+
+    // Handle state responses for reconnecting users
+    ch.on('broadcast', { event: 'player:state_response' }, ({ payload }) => {
+      if (!payload || payload.sender === clientIdRef.current || payload.target !== clientIdRef.current) return
+      
+      const { index, time, isPlaying: remoteIsPlaying } = payload as { 
+        index: number; 
+        time: number; 
+        isPlaying: boolean;
+        sender: string;
+        target: string;
+      }
+      
+      // Update local state to match host
+      if (index >= 0 && index < tracksRef.current.length) {
+        setCurrentIndex(index)
+        setCurrentTime(time)
+        
+        if (remoteIsPlaying && !isPlaying) {
+          // Host is playing, so we should play too
+          shouldAutoplayRef.current = true
+          const audio = audioRef.current
+          if (audio) {
+            try {
+              audio.currentTime = time
+              void audio.play()
+              setIsPlaying(true)
+            } catch (e) {
+              setPlaybackBlocked(true)
+            }
+          }
+        } else if (!remoteIsPlaying && isPlaying) {
+          // Host is paused, so we should pause too
+          const audio = audioRef.current
+          if (audio) {
+            audio.pause()
+          }
+          setIsPlaying(false)
+        }
+        
+        addToast('Synced with host player state', 'info')
+      }
+    })
+
+    // Handle ping events for keep-alive
+    ch.on('broadcast', { event: 'ping' }, ({ payload }) => {
+      if (!payload || payload.sender === clientIdRef.current) return
+      
+      // Respond to ping with pong to confirm connection is alive
+      try {
+        ch.send({
+          type: 'broadcast',
+          event: 'pong',
+          payload: { 
+            sender: clientIdRef.current, 
+            timestamp: Date.now(),
+            respondingTo: payload.sender 
+          }
+        })
+      } catch (error) {
+        console.log('Failed to send pong response:', error)
+      }
+    })
+
+    // Handle pong responses
+    ch.on('broadcast', { event: 'pong' }, ({ payload }) => {
+      if (!payload || payload.sender === clientIdRef.current) return
+      
+      // Log successful keep-alive response
+      if (payload.respondingTo === clientIdRef.current) {
+        console.log('Keep-alive response received from:', payload.sender)
+      }
+    })
+
     ch.subscribe(async (status) => {
       if (status === 'SUBSCRIBED') {
         // Track self presence with name
@@ -1079,8 +1255,197 @@ export default function App(): JSX.Element {
     return () => {
       ch.unsubscribe()
       channelRef.current = null
+      
+      // Clean up event listeners
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('focus', handleFocus)
+      window.removeEventListener('blur', handleBlur)
+      
+      // Clear any reconnect timeout
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout)
+      }
     }
   }, [inRoom, roomCode])
+
+  // Enhanced background audio and connection reliability
+  useEffect(() => {
+    if (!inRoom || !currentTrack) return
+
+    // Register service worker for background sync
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').then((registration) => {
+        console.log('Service Worker registered:', registration);
+        
+        // Register keep-alive with service worker
+        if (registration.active) {
+          registration.active.postMessage({
+            type: 'REGISTER_KEEP_ALIVE'
+          });
+        }
+      }).catch((error) => {
+        console.log('Service Worker registration failed:', error);
+      });
+    }
+
+    // Media Session API for background controls
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: currentTrack.name,
+        artist: 'GrooveBox Room',
+        album: `Room: ${roomCode}`,
+        artwork: [
+          {
+            src: '/favicon/favicon.svg',
+            sizes: '96x96',
+            type: 'image/svg+xml'
+          }
+        ]
+      })
+
+      // Handle background media controls
+      navigator.mediaSession.setActionHandler('play', () => {
+        if (audioRef.current && audioRef.current.paused) {
+          void audioRef.current.play()
+          setIsPlaying(true)
+        }
+      })
+
+      navigator.mediaSession.setActionHandler('pause', () => {
+        if (audioRef.current && !audioRef.current.paused) {
+          audioRef.current.pause()
+          setIsPlaying(false)
+        }
+      })
+
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        if (hasPrevious) goPrevious()
+      })
+
+      navigator.mediaSession.setActionHandler('nexttrack', () => {
+        if (hasNext) goNext()
+      })
+
+      navigator.mediaSession.setActionHandler('seekto', (details) => {
+        if (audioRef.current && details.seekTime !== undefined) {
+          audioRef.current.currentTime = details.seekTime
+          setCurrentTime(details.seekTime)
+        }
+      })
+
+      // Update playback state
+      navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'
+    }
+
+    // Enhanced keep-alive mechanism for WebSocket connection
+    const keepAliveInterval = setInterval(() => {
+      if (channelRef.current) {
+        // Send a ping to keep the connection alive
+        try {
+          channelRef.current.send({
+            type: 'broadcast',
+            event: 'ping',
+            payload: { sender: clientIdRef.current, timestamp: Date.now() }
+          })
+        } catch (error) {
+          console.log('Keep-alive ping failed, connection may be stale')
+        }
+      }
+    }, 25000) // Every 25 seconds (slightly faster than service worker)
+
+    // Background audio optimization
+    const audio = audioRef.current
+    if (audio) {
+      // Set audio session to continue in background
+      if ('mediaSession' in navigator) {
+        // Enable background audio on mobile
+        audio.setAttribute('playsinline', 'true')
+        audio.setAttribute('webkit-playsinline', 'true')
+        
+        // Set audio session category for background playback (Firefox)
+        if ('mozAudioChannelType' in audio) {
+          (audio as any).mozAudioChannelType = 'content'
+        }
+      }
+
+              // Resume audio context if suspended (mobile backgrounding)
+        const resumeAudioContext = async () => {
+          try {
+            if (audio.readyState === 0) { // HAVE_NOTHING
+              await audio.load()
+            }
+          } catch (error) {
+            console.log('Audio context resume failed:', error)
+          }
+        }
+
+      // Resume on user interaction
+      const handleUserInteraction = () => {
+        resumeAudioContext()
+        document.removeEventListener('touchstart', handleUserInteraction)
+        document.removeEventListener('click', handleUserInteraction)
+        document.removeEventListener('keydown', handleUserInteraction)
+      }
+
+      document.addEventListener('touchstart', handleUserInteraction)
+      document.addEventListener('click', handleUserInteraction)
+      document.addEventListener('keydown', handleUserInteraction)
+
+      // Listen for service worker messages
+      const handleServiceWorkerMessage = (event: MessageEvent) => {
+        if (event.data && event.data.type === 'KEEP_ALIVE') {
+          // Service worker is keeping us alive, ensure connection is active
+          if (channelRef.current) {
+            try {
+              channelRef.current.send({
+                type: 'broadcast',
+                event: 'ping',
+                payload: { sender: clientIdRef.current, timestamp: Date.now() }
+              })
+            } catch (error) {
+              console.log('Service worker keep-alive ping failed:', error)
+            }
+          }
+        }
+      }
+
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage)
+      }
+
+      // Cleanup
+      return () => {
+        clearInterval(keepAliveInterval)
+        document.removeEventListener('touchstart', handleUserInteraction)
+        document.removeEventListener('click', handleUserInteraction)
+        document.removeEventListener('keydown', handleUserInteraction)
+        
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage)
+        }
+        
+        // Clean up Media Session
+        if ('mediaSession' in navigator) {
+          navigator.mediaSession.setActionHandler('play', null)
+          navigator.mediaSession.setActionHandler('pause', null)
+          navigator.mediaSession.setActionHandler('previoustrack', null)
+          navigator.mediaSession.setActionHandler('nexttrack', null)
+          navigator.mediaSession.setActionHandler('seekto', null)
+        }
+        
+        // Unregister keep-alive from service worker
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.ready.then((registration) => {
+            if (registration.active) {
+              registration.active.postMessage({
+                type: 'UNREGISTER_KEEP_ALIVE'
+              })
+            }
+          })
+        }
+      }
+    }
+  }, [inRoom, currentTrack, isPlaying, hasPrevious, hasNext, roomCode])
 
   // Restore session on first render, but only if room still exists and has not ended
   useEffect(() => {
@@ -1728,5 +2093,7 @@ export default function App(): JSX.Element {
     </div>
   )
 }
+
+
 
 
