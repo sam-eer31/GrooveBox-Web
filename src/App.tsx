@@ -29,6 +29,13 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`
 }
 
+function deriveDisplayNameFromObjectName(objectName: string): string {
+  // Matches UUID prefixes we add during upload: <uuid>-<original-name>
+  const uuidPrefixPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}-(.+)$/
+  const match = objectName.match(uuidPrefixPattern)
+  return match ? match[1] : objectName
+}
+
 export default function App(): JSX.Element {
   const [roomCode, setRoomCode] = useState<string>('')
   const [joinCodeInput, setJoinCodeInput] = useState<string>('')
@@ -172,21 +179,24 @@ export default function App(): JSX.Element {
       }
 
       if (uploadedTracks.length > 0) {
-        // Persist track metadata (display names) to tracks.json
-        try {
-          const metaPath = `rooms/${roomCode}/tracks.json`
-          const { data: existing } = await supabase.storage.from(bucket).download(metaPath)
-          let trackMeta: Array<{ path: string; name: string }> = []
-          if (existing) {
-            try { trackMeta = JSON.parse(await existing.text()) as Array<{ path: string; name: string }> } catch {}
-          }
-          const toAppend = uploadedTracks.map(t => ({ path: t.path, name: t.name }))
-          // Merge unique by path
-          const seen = new Set(trackMeta.map(i => i.path))
-          for (const it of toAppend) { if (!seen.has(it.path)) trackMeta.push(it) }
-          const blob = new Blob([JSON.stringify(trackMeta, null, 2)], { type: 'application/json' })
-          await supabase.storage.from(bucket).upload(metaPath, blob, { upsert: true, cacheControl: 'no-cache' })
-        } catch {}
+        // Optionally persist track metadata (display names) to tracks.json
+        const shouldWriteMeta = (import.meta.env.VITE_ENABLE_TRACKS_META as string) === '1'
+        if (shouldWriteMeta) {
+          try {
+            const metaPath = `rooms/${roomCode}/tracks.json`
+            const { data: existing } = await supabase.storage.from(bucket).download(metaPath)
+            let trackMeta: Array<{ path: string; name: string }> = []
+            if (existing) {
+              try { trackMeta = JSON.parse(await existing.text()) as Array<{ path: string; name: string }> } catch {}
+            }
+            const toAppend = uploadedTracks.map(t => ({ path: t.path, name: t.name }))
+            // Merge unique by path
+            const seen = new Set(trackMeta.map(i => i.path))
+            for (const it of toAppend) { if (!seen.has(it.path)) trackMeta.push(it) }
+            const blob = new Blob([JSON.stringify(trackMeta, null, 2)], { type: 'application/json' })
+            await supabase.storage.from(bucket).upload(metaPath, blob, { upsert: true })
+          } catch {}
+        }
 
         setTracks(prev => {
           const next = [...prev, ...uploadedTracks]
@@ -226,14 +236,17 @@ export default function App(): JSX.Element {
             setRoomTitle(meta.roomName || '')
           }
         } catch {}
-        // Load track display names if present
+        // Load track display names if present (optional)
         let nameByPath = new Map<string, string>()
         try {
-          const { data: tracksFile } = await supabase.storage.from(bucket).download(`${prefix}/tracks.json`)
-          if (tracksFile) {
-            const text = await tracksFile.text()
-            const list = JSON.parse(text) as Array<{ path: string; name: string }>
-            list.forEach(it => nameByPath.set(it.path, it.name))
+          const canReadMeta = (import.meta.env.VITE_ENABLE_TRACKS_META as string) === '1'
+          if (canReadMeta) {
+            const { data: tracksFile } = await supabase.storage.from(bucket).download(`${prefix}/tracks.json`)
+            if (tracksFile) {
+              const text = await tracksFile.text()
+              const list = JSON.parse(text) as Array<{ path: string; name: string }>
+              list.forEach(it => nameByPath.set(it.path, it.name))
+            }
           }
         } catch {}
         const { data: files, error: listErr } = await supabase.storage.from(bucket).list(prefix, {
@@ -255,7 +268,7 @@ export default function App(): JSX.Element {
           const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
           const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl
           if (!url) continue
-          const displayName = nameByPath.get(path) || f.name
+          const displayName = nameByPath.get(path) || deriveDisplayNameFromObjectName(f.name)
           loaded.push({ id: path, url, name: displayName, path })
         }
 
@@ -530,8 +543,11 @@ export default function App(): JSX.Element {
     if (!supabase) return false
     const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
     try {
-      const { data } = await supabase.storage.from(bucket).download(`rooms/${code}/meta.json`)
-      return !!data
+      const { data: list } = await supabase.storage.from(bucket).list(`rooms/${code}`, {
+        limit: 1,
+        search: 'meta.json'
+      })
+      return Array.isArray(list) && list.some(f => f.name === 'meta.json')
     } catch {
       return false
     }
@@ -541,8 +557,11 @@ export default function App(): JSX.Element {
     if (!supabase) return false
     const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
     try {
-      const { data } = await supabase.storage.from(bucket).download(`ended/${code}.json`)
-      return !!data
+      const { data: list } = await supabase.storage.from(bucket).list('ended', {
+        limit: 1,
+        search: `${code}.json`
+      })
+      return Array.isArray(list) && list.some(f => f.name === `${code}.json`)
     } catch {
       return false
     }
@@ -810,76 +829,88 @@ export default function App(): JSX.Element {
   // Render based on state; hooks above are unconditional to preserve order
   if (!inRoom) {
     return (
-      <div className={`min-h-full flex flex-col ${theme === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-white text-slate-900'}`}>
-        <header className="p-6 md:p-8">
-          <div className="max-w-3xl mx-auto flex items-center justify-between">
+      <div className={`min-h-full flex flex-col ${theme === 'dark' ? 'bg-black text-white' : 'bg-white text-black'}`}>
+        <header className="border-b border-black/10 dark:border-white/10">
+          <div className="container-pro flex h-16 items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="h-8 w-8 rounded-md bg-brand-500/20 ring-1 ring-brand-500/30 grid place-items-center">
+              <div className="h-8 w-8 rounded-md bg-brand-500/20 ring-1 ring-brand-500/40 grid place-items-center">
                 <Music className="h-4 w-4 text-brand-500" />
               </div>
-              <h1 className="text-xl font-semibold tracking-tight">GrooveBox Rooms</h1>
+              <h1 className="text-base md:text-lg font-semibold tracking-tight">GrooveBox</h1>
             </div>
-            <button onClick={()=>setTheme(theme==='dark'?'light':'dark')} className="rounded-md border border-slate-700 px-3 py-2 text-sm hover:border-brand-500/60 inline-flex items-center gap-2">
-              {theme==='dark'? 'Light' : 'Dark'} Mode
+            <button
+              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+              className="icon-btn"
+              aria-label="Toggle theme"
+              title={theme==='dark'?'Switch to light':'Switch to dark'}
+            >
+              {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
           </div>
         </header>
         <main className="flex-1">
-          <div className="max-w-3xl mx-auto px-6 md:px-8 grid md:grid-cols-2 gap-6">
-            <div className={`${theme==='dark'?'bg-slate-800/60 ring-white/5':'bg-slate-100 ring-slate-300'} rounded-xl p-6 ring-1`}>
-              <h2 className="font-semibold">Create a Room</h2>
-              <p className="mt-1 text-sm text-slate-400">Host a synced listening session.</p>
-              <div className="mt-4 grid gap-3">
-                <div className="grid gap-1.5">
-                  <label className="text-xs text-slate-400">Your Name</label>
-                  <input value={createName} onChange={(e)=>setCreateName(e.currentTarget.value)} placeholder="e.g. Alex" className={`rounded-md ${theme==='dark'?'bg-slate-900 border-slate-700':'bg-white border-slate-300'} border px-3 py-2 outline-none focus:border-brand-500/60`} />
+          <section className="container-pro py-10 md:py-14">
+            <div className="mb-8 text-center md:text-left">
+              <h2 className="text-2xl md:text-3xl font-semibold tracking-tight">Listen together, in sync</h2>
+              <p className="mt-2 text-sm text-black/60 dark:text-white/60">Create a room, upload tracks, and share a code. Everyone hears the same thing at the same time.</p>
+            </div>
+            <div className="grid md:grid-cols-2 gap-6">
+              <div className="panel p-6 md:p-7">
+                <h3 className="font-semibold">Create a Room</h3>
+                <p className="mt-1 text-sm text-black/60 dark:text-white/60">Host a synced listening session.</p>
+                <div className="mt-4 grid gap-3">
+                  <div className="grid gap-1.5">
+                    <label className="label">Your Name</label>
+                    <input value={createName} onChange={(e)=>setCreateName(e.currentTarget.value)} placeholder="e.g. Alex" className="input" />
+                  </div>
+                  <div className="grid gap-1.5">
+                    <label className="label">Room Name (optional)</label>
+                    <input value={roomTitleInput} onChange={(e)=>setRoomTitleInput(e.currentTarget.value)} placeholder="e.g. Friday Jam" className="input" />
+                  </div>
+                  <button onClick={createRoom} className="btn-primary mt-2">Create Room</button>
                 </div>
-                <div className="grid gap-1.5">
-                  <label className="text-xs text-slate-400">Room Name (optional)</label>
-                  <input value={roomTitleInput} onChange={(e)=>setRoomTitleInput(e.currentTarget.value)} placeholder="e.g. Friday Jam" className={`rounded-md ${theme==='dark'?'bg-slate-900 border-slate-700':'bg-white border-slate-300'} border px-3 py-2 outline-none focus:border-brand-500/60`} />
+              </div>
+              <div className="panel p-6 md:p-7">
+                <h3 className="font-semibold">Join a Room</h3>
+                <p className="mt-1 text-sm text-black/60 dark:text-white/60">Enter a room code to join.</p>
+                <div className="mt-4 grid gap-3">
+                  <div className="grid gap-1.5">
+                    <label className="label">Your Name</label>
+                    <input value={joinName} onChange={(e)=>setJoinName(e.currentTarget.value)} placeholder="e.g. Alex" className="input" />
+                  </div>
+                  <div className="flex gap-2">
+                    <input value={joinCodeInput} onChange={(e)=>setJoinCodeInput(e.currentTarget.value)} placeholder="Enter room code" className="input font-mono tracking-widest" />
+                    <button onClick={joinRoom} className="btn-outline">Join</button>
+                  </div>
+                  {error && <p className="text-sm text-red-500" role="alert" aria-live="polite">{error}</p>}
                 </div>
-                <button onClick={createRoom} className="mt-2 rounded-md bg-brand-500 text-slate-900 font-medium px-4 py-2">Create Room</button>
               </div>
             </div>
-            <div className={`${theme==='dark'?'bg-slate-800/60 ring-white/5':'bg-slate-100 ring-slate-300'} rounded-xl p-6 ring-1`}>
-              <h2 className="font-semibold">Join a Room</h2>
-              <p className="mt-1 text-sm text-slate-400">Enter a room code to join.</p>
-              <div className="mt-4 grid gap-3">
-                <div className="grid gap-1.5">
-                  <label className="text-xs text-slate-400">Your Name</label>
-                  <input value={joinName} onChange={(e)=>setJoinName(e.currentTarget.value)} placeholder="e.g. Alex" className={`rounded-md ${theme==='dark'?'bg-slate-900 border-slate-700':'bg-white border-slate-300'} border px-3 py-2 outline-none focus:border-brand-500/60`} />
-                </div>
-                <div className="flex gap-2">
-                  <input value={joinCodeInput} onChange={(e)=>setJoinCodeInput(e.currentTarget.value)} placeholder="Enter room code" className={`flex-1 rounded-md ${theme==='dark'?'bg-slate-900 border-slate-700':'bg-white border-slate-300'} border px-3 py-2 outline-none focus:border-brand-500/60 font-mono tracking-widest`} />
-                  <button onClick={joinRoom} className={`rounded-md border px-4 py-2 hover:border-brand-500/60 ${theme==='dark'?'border-slate-700':'border-slate-300'}`}>Join</button>
-                </div>
-                {error && <p className="text-sm text-red-400" role="alert" aria-live="polite">{error}</p>}
-              </div>
-            </div>
-          </div>
+          </section>
         </main>
-        <footer className="px-6 md:px-8 py-8 text-center text-xs text-slate-500">Built with React, Vite, and Tailwind</footer>
+        <footer className="container-pro py-8 text-center text-xs text-black/60 dark:text-white/60">Built with React, Vite, and Tailwind</footer>
       </div>
     )
   }
   
 
   return (
-    <div className={`min-h-full flex flex-col ${theme==='dark'?'bg-slate-950 text-slate-100':'bg-white text-slate-900'}`}>
-      <header className="p-6 md:p-8">
-        <div className="max-w-3xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-md bg-brand-500/20 ring-1 ring-brand-500/30 grid place-items-center">
+    <div className={`min-h-full flex flex-col ${theme==='dark'?'bg-black text-white':'bg-white text-black'}`}>
+      <header className="border-b border-black/10 dark:border-white/10">
+        <div className="container-pro flex h-16 items-center gap-3">
+          <div className="flex items-center gap-3 flex-1">
+            <div className="h-8 w-8 rounded-md bg-brand-500/20 ring-1 ring-brand-500/40 grid place-items-center">
               <Music className="h-4 w-4 text-brand-500" />
             </div>
-            <div>
-              <h1 className="text-xl font-semibold tracking-tight">GrooveBox</h1>
-              <p className="text-xs text-slate-400">Room: <span className="font-mono">{roomCode}</span> {isHost && <span className="ml-2 text-brand-500">(Host)</span>} {roomTitle && <span className="ml-2">· {roomTitle}</span>}</p>
+            <div className="min-w-0">
+              <h1 className="text-base md:text-lg font-semibold tracking-tight">GrooveBox</h1>
+              <p className="text-[11px] text-black/60 dark:text-white/60 truncate">
+                Room <span className="font-mono px-1.5 py-0.5 rounded-md bg-black/5 dark:bg-white/10">{roomCode}</span>
+                {isHost && <span className="ml-2 text-brand-500">Host</span>}
+                {roomTitle && <span className="ml-2">· {roomTitle}</span>}
+              </p>
             </div>
           </div>
-          <button onClick={()=>setTheme(theme==='dark'?'light':'dark')} className="rounded-md border px-3 py-2 text-sm hover:border-brand-500/60 ${theme==='dark'?'border-slate-700':'border-slate-300'}">
-            {theme==='dark'?'Light':'Dark'} Mode
-          </button>
 
           <input
             id="file-input"
@@ -892,215 +923,241 @@ export default function App(): JSX.Element {
           />
           <label
             htmlFor="file-input"
-            className="rounded-md bg-brand-500 text-slate-900 font-medium px-4 py-2 hover:brightness-110 active:brightness-110 transition cursor-pointer inline-flex items-center gap-2"
+            className="btn-primary cursor-pointer hidden sm:inline-flex"
             onClick={() => { if (inputRef.current) inputRef.current.value = '' }}
           >
             <UploadIcon className="h-4 w-4" /> Upload
           </label>
-          <div className="ml-3 flex items-center gap-2">
+
+          <div className="ml-2 hidden sm:flex items-center gap-2">
             {isHost ? (
-              <button onClick={endRoom} className="rounded-md border border-red-500/60 text-red-300 px-3 py-2 hover:bg-red-500/10 inline-flex items-center gap-2">End Room</button>
+              <button onClick={endRoom} className="btn-outline border-red-500/60 text-red-500 hover:bg-red-500/10">End Room</button>
             ) : (
-              <button onClick={leaveRoom} className="rounded-md border border-slate-700 px-3 py-2 hover:border-brand-500/60 inline-flex items-center gap-2">Leave</button>
+              <button onClick={leaveRoom} className="btn-outline">Leave</button>
             )}
           </div>
+          <button
+            onClick={() => setTheme(theme==='dark'?'light':'dark')}
+            className="icon-btn ml-2"
+            aria-label="Toggle theme"
+            title={theme==='dark'?'Switch to light':'Switch to dark'}
+          >
+            {theme==='dark'? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+          </button>
         </div>
       </header>
 
       <main className="flex-1">
-        <div className="max-w-3xl mx-auto px-6 md:px-8">
+        <div className="container-pro py-6">
           {playbackBlocked && (
-            <div className="mb-3 rounded-md border border-yellow-500/40 bg-yellow-400/10 text-yellow-200 px-3 py-2 text-sm flex items-center justify-between">
+            <div className="mb-4 rounded-md border border-yellow-500/40 bg-yellow-400/10 text-yellow-200 px-3 py-2 text-sm flex items-center justify-between">
               <span>Playback is blocked by your browser. Click to enable synced playback.</span>
-              <button onClick={unlockPlayback} className="ml-3 rounded bg-yellow-400 text-slate-900 px-2 py-1 text-xs font-medium">Enable</button>
+              <button onClick={unlockPlayback} className="ml-3 rounded bg-yellow-400 text-black px-2 py-1 text-xs font-medium">Enable</button>
             </div>
           )}
-          <div className="flex items-center justify-between">
-            <div className="text-sm text-slate-400">You: <span className="font-medium text-slate-200">{displayName || 'Guest'}</span></div>
-            <div className="text-sm text-slate-400">Participants: <span className="font-medium text-slate-200">{participants.length + 1}</span></div>
+
+          <div className="mb-4 flex items-center justify-between text-xs">
+            <div className="text-black/60 dark:text-white/60">You: <span className="font-medium text-black dark:text-white">{displayName || 'Guest'}</span></div>
+            <div className="text-black/60 dark:text-white/60">Participants: <span className="font-medium text-black dark:text-white">{participants.length + 1}</span></div>
           </div>
           {participants.length > 0 && (
-            <div className="mt-2 text-xs text-slate-400">
-              {participants.map(p => p.name).join(', ')}
+            <div className="mb-4 flex flex-wrap gap-2">
+              {participants.map((p, i) => (
+                <span key={p.key + i} className="px-2 py-1 rounded-md text-[11px] bg-black/5 dark:bg-white/10 text-black/70 dark:text-white/70">{p.name}</span>
+              ))}
             </div>
           )}
-          {toast && <div className="mt-2 text-xs text-slate-300">{toast}</div>}
-          {/* Clear any stale error when entering in-room view */}
+          {toast && <div className="mb-3 text-xs text-black/70 dark:text-white/70">{toast}</div>}
           {error && inRoom && <div className="hidden">{setTimeout(()=>setError(null),0)}</div>}
-          <div
-            onDrop={onDrop}
-            onDragOver={onDragOver}
-            className="border-2 border-dashed border-slate-700 rounded-xl p-8 md:p-12 text-center hover:border-brand-500/60 transition"
-          >
-            <p className="text-slate-300">Drag and drop songs here, or</p>
-            <label
-              htmlFor="file-input"
-              className="mt-3 inline-block rounded-md border border-slate-700 px-4 py-2 hover:border-brand-500/60 hover:text-brand-500 transition cursor-pointer"
-              onClick={() => { if (inputRef.current) inputRef.current.value = '' }}
-            >
-              Choose Files
-            </label>
 
-            {isUploading && (
-              <p className="mt-4 text-sm text-slate-300">Uploading...</p>
-            )}
-            {isLoadingLibrary && (
-              <p className="mt-2 text-sm text-slate-400">Loading your library…</p>
-            )}
-            {error && (
-              <p className="mt-2 text-sm text-red-400">{error}</p>
-            )}
-          </div>
+          <div className="grid lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2">
+              <div
+                onDrop={onDrop}
+                onDragOver={onDragOver}
+                className="panel p-6 text-center border-2 border-dashed border-black/20 dark:border-white/20 hover:border-brand-500/60 transition"
+              >
+                <p className="text-black/70 dark:text-white/70">Drag and drop songs here, or</p>
+                <label
+                  htmlFor="file-input"
+                  className="mt-3 inline-flex btn-outline cursor-pointer"
+                  onClick={() => { if (inputRef.current) inputRef.current.value = '' }}
+                >
+                  Choose Files
+                </label>
+                {isUploading && (
+                  <p className="mt-4 text-sm text-black/70 dark:text-white/70">Uploading...</p>
+                )}
+                {isLoadingLibrary && (
+                  <p className="mt-2 text-sm text-black/60 dark:text-white/60">Loading your library…</p>
+                )}
+                {error && (
+                  <p className="mt-2 text-sm text-red-500">{error}</p>
+                )}
+              </div>
 
-          {/* Player (card) */}
-          <div className="mt-8">
-            <div className="rounded-2xl p-6 md:p-8 shadow-lg ring-1 ring-black/10 dark:ring-white/10 bg-white/80 dark:bg-slate-900/70 backdrop-blur">
-              <div className="flex items-center gap-5">
-                <div className="h-16 w-16 md:h-20 md:w-20 rounded-lg bg-gradient-to-br from-brand-500/30 to-slate-500/30 grid place-items-center ring-1 ring-white/10">
-                  <Music className="h-7 w-7 text-brand-500" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs uppercase tracking-wide text-slate-500">Now Playing</p>
-                  <h2 className="mt-1 text-lg md:text-xl font-semibold truncate" title={fileName}>{fileName}</h2>
-                  <div className="mt-3 flex items-center justify-center gap-3">
-                    <button
-                      onClick={goPrevious}
-                      disabled={!hasPrevious}
-                      className="h-10 w-10 rounded-full bg-slate-200 text-slate-800 grid place-items-center hover:bg-slate-300 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600 disabled:opacity-40"
-                      aria-label="Previous"
-                    >
-                      <SkipBack className="h-4 w-4" />
-                    </button>
-                    <button
-                      onClick={togglePlay}
-                      disabled={!currentTrack}
-                      className="h-12 w-12 rounded-full bg-brand-500 text-slate-900 grid place-items-center hover:brightness-110 disabled:opacity-50"
-                      aria-label={isPlaying ? 'Pause' : 'Play'}
-                    >
-                      {isPlaying ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6" />}
-                    </button>
-                    <button
-                      onClick={goNext}
-                      disabled={!hasNext}
-                      className="h-10 w-10 rounded-full bg-slate-200 text-slate-800 grid place-items-center hover:bg-slate-300 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600 disabled:opacity-40"
-                      aria-label="Next"
-                    >
-                      <SkipForward className="h-4 w-4" />
-                    </button>
+              <div className="mt-6 card p-6 md:p-7 shadow-soft">
+                <div className="flex items-center gap-5">
+                  <div className="h-16 w-16 md:h-20 md:w-20 rounded-lg bg-gradient-to-br from-brand-500/30 to-white/10 grid place-items-center ring-1 ring-white/10">
+                    <Music className="h-7 w-7 text-brand-500" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] uppercase tracking-wide text-black/60 dark:text-white/60">Now Playing</p>
+                    <h2 className="mt-1 text-lg md:text-xl font-semibold truncate" title={fileName}>{fileName}</h2>
+                    <div className="mt-3 flex items-center justify-center gap-3">
+                      <button
+                        onClick={goPrevious}
+                        disabled={!hasPrevious}
+                        className="icon-btn h-10 w-10 rounded-full"
+                        aria-label="Previous"
+                      >
+                        <SkipBack className="h-4 w-4" />
+                      </button>
+                      <button
+                        onClick={togglePlay}
+                        disabled={!currentTrack}
+                        className="inline-flex items-center justify-center h-12 w-12 rounded-full bg-brand-500 text-black hover:brightness-110 disabled:opacity-50"
+                        aria-label={isPlaying ? 'Pause' : 'Play'}
+                      >
+                        {isPlaying ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6" />}
+                      </button>
+                      <button
+                        onClick={goNext}
+                        disabled={!hasNext}
+                        className="icon-btn h-10 w-10 rounded-full"
+                        aria-label="Next"
+                      >
+                        <SkipForward className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="hidden md:flex items-center gap-2 w-44">
+                    <Volume2 className="h-4 w-4 text-black/60 dark:text-white/60" />
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={volume}
+                      onChange={(e) => setVolume(Number(e.currentTarget.value))}
+                      className="w-full accent-brand-500"
+                    />
                   </div>
                 </div>
-                <div className="hidden md:flex items-center gap-2 w-40">
-                  <Volume2 className="h-4 w-4 text-slate-500" />
+                <div className="mt-4">
                   <input
                     type="range"
                     min={0}
-                    max={1}
-                    step={0.01}
-                    value={volume}
-                    onChange={(e) => setVolume(Number(e.currentTarget.value))}
+                    max={duration || 0}
+                    step={0.1}
+                    value={currentTime}
+                    onChange={(e) => onSeek(Number(e.currentTarget.value))}
                     className="w-full accent-brand-500"
+                    disabled={!currentTrack}
                   />
+                  <div className="mt-1 flex justify-between text-[11px] text-black/60 dark:text-white/60">
+                    <span>{formatTime(currentTime)}</span>
+                    <span>{formatTime(duration)}</span>
+                  </div>
+                  <div className="mt-3 flex items-center gap-2 md:hidden">
+                    <Volume2 className="h-4 w-4 text-black/60 dark:text-white/60" />
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={volume}
+                      onChange={(e) => setVolume(Number(e.currentTarget.value))}
+                      className="w-2/3 accent-brand-500"
+                    />
+                  </div>
                 </div>
-              </div>
-              <div className="mt-4">
-                <input
-                  type="range"
-                  min={0}
-                  max={duration || 0}
-                  step={0.1}
-                  value={currentTime}
-                  onChange={(e) => onSeek(Number(e.currentTarget.value))}
-                  className="w-full accent-brand-500"
-                  disabled={!currentTrack}
+
+                <audio
+                  ref={audioRef}
+                  src={currentTrack?.url}
+                  onLoadedMetadata={onLoadedMetadata}
+                  onTimeUpdate={onTimeUpdate}
+                  onEnded={() => {
+                    if (hasNext) {
+                      goNext()
+                    } else {
+                      setIsPlaying(false)
+                      setCurrentTime(0)
+                      shouldAutoplayRef.current = false
+                    }
+                  }}
+                  className="hidden"
+                  controls
                 />
-                <div className="mt-1 flex justify-between text-xs text-slate-500">
-                  <span>{formatTime(currentTime)}</span>
-                  <span>{formatTime(duration)}</span>
-                </div>
-                {/* Mobile volume control */}
-                <div className="mt-3 flex items-center gap-2 md:hidden">
-                  <Volume2 className="h-4 w-4 text-slate-500" />
-                  <input
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    value={volume}
-                    onChange={(e) => setVolume(Number(e.currentTarget.value))}
-                    className="w-2/3 accent-brand-500"
-                  />
-                </div>
               </div>
-
-              {/* Audio element */}
-              <audio
-                ref={audioRef}
-                src={currentTrack?.url}
-                onLoadedMetadata={onLoadedMetadata}
-                onTimeUpdate={onTimeUpdate}
-                onEnded={() => {
-                  if (hasNext) {
-                    goNext()
-                  } else {
-                    setIsPlaying(false)
-                    setCurrentTime(0)
-                    shouldAutoplayRef.current = false
-                  }
-                }}
-                className="hidden"
-                controls
-              />
             </div>
-          </div>
 
-          {/* Playlist (below player) */}
-          <div className="mt-8">
-            <div className="rounded-xl p-5 ring-1 ring-black/10 dark:ring-white/10 bg-white/60 dark:bg-slate-800/40">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm uppercase tracking-wide text-slate-500">Playlist</h3>
-                <span className="text-xs text-slate-500">{tracks.length} {tracks.length === 1 ? 'track' : 'tracks'}</span>
+            <div>
+              <div className="panel p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-xs uppercase tracking-wide text-black/60 dark:text-white/60">Playlist</h3>
+                  <span className="text-[11px] text-black/60 dark:text-white/60">{tracks.length} {tracks.length === 1 ? 'track' : 'tracks'}</span>
+                </div>
+                {tracks.length === 0 ? (
+                  <p className="text-sm text-black/60 dark:text-white/60">No songs yet. Upload MP3 or WAV files to get started.</p>
+                ) : (
+                  <ul className="divide-y divide-black/10 dark:divide-white/10">
+                    {tracks.map((t, idx) => {
+                      const active = idx === currentIndex
+                      return (
+                        <li key={t.id}>
+                          <button
+                            className={`w-full text-left px-3 py-2 rounded-md transition ${active ? 'bg-black/5 dark:bg-white/10 text-brand-500' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}
+                            onClick={() => {
+                              setCurrentIndex(idx)
+                              setCurrentTime(0)
+                              shouldAutoplayRef.current = true
+                              const audio = audioRef.current
+                              if (audio) {
+                                try { audio.currentTime = 0; void audio.play(); setIsPlaying(true) } catch { setPlaybackBlocked(true) }
+                              }
+                              if (channelRef.current) {
+                                channelRef.current.send({ type: 'broadcast', event: 'player:select', payload: { index: idx, sender: clientIdRef.current } })
+                                channelRef.current.send({ type: 'broadcast', event: 'player:play', payload: { index: idx, time: 0, sender: clientIdRef.current } })
+                              }
+                            }}
+                          >
+                            <div className="flex items-center gap-3">
+                              <span className="text-[11px] w-6 text-black/60 dark:text-white/60">{idx + 1}</span>
+                              <span className="truncate" title={t.name}>{t.name}</span>
+                              {active && isPlaying && <span aria-hidden className="ml-auto text-xs">▶</span>}
+                            </div>
+                          </button>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
               </div>
-              {tracks.length === 0 ? (
-                <p className="text-slate-500 text-sm">No songs yet. Upload MP3 or WAV files to get started.</p>
-              ) : (
-                <ul className="divide-y divide-slate-200/50 dark:divide-slate-700/40">
-                  {tracks.map((t, idx) => {
-                    const active = idx === currentIndex
-                    return (
-                      <li key={t.id}>
-                        <button
-                          className={`w-full text-left px-3 py-2 rounded-md hover:bg-slate-100/60 dark:hover:bg-slate-700/30 transition ${active ? 'bg-slate-100/60 dark:bg-slate-700/30 text-brand-500' : ''}`}
-                          onClick={() => {
-                            setCurrentIndex(idx)
-                            setCurrentTime(0)
-                            shouldAutoplayRef.current = true
-                            const audio = audioRef.current
-                            if (audio) {
-                              try { audio.currentTime = 0; void audio.play(); setIsPlaying(true) } catch { setPlaybackBlocked(true) }
-                            }
-                            if (channelRef.current) {
-                              channelRef.current.send({ type: 'broadcast', event: 'player:select', payload: { index: idx, sender: clientIdRef.current } })
-                              channelRef.current.send({ type: 'broadcast', event: 'player:play', payload: { index: idx, time: 0, sender: clientIdRef.current } })
-                            }
-                          }}
-                        >
-                          <div className="flex items-center gap-3">
-                            <span className="text-xs w-6 text-slate-500">{idx + 1}</span>
-                            <span className="truncate" title={t.name}>{t.name}</span>
-                            {active && isPlaying && <span aria-hidden className="ml-auto text-xs">▶</span>}
-                          </div>
-                        </button>
-                      </li>
-                    )
-                  })}
-                </ul>
-              )}
+
+              <div className="mt-4 sm:hidden">
+                <label
+                  htmlFor="file-input"
+                  className="btn-primary w-full text-center cursor-pointer"
+                  onClick={() => { if (inputRef.current) inputRef.current.value = '' }}
+                >
+                  <UploadIcon className="h-4 w-4 mr-2" /> Upload
+                </label>
+                <div className="mt-2 flex gap-2">
+                  {isHost ? (
+                    <button onClick={endRoom} className="btn-outline border-red-500/60 text-red-500 hover:bg-red-500/10 w-full">End Room</button>
+                  ) : (
+                    <button onClick={leaveRoom} className="btn-outline w-full">Leave</button>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         </div>
       </main>
 
-      <footer className="px-6 md:px-8 py-8 text-center text-xs text-slate-500">
+      <footer className="container-pro py-8 text-center text-xs text-black/60 dark:text-white/60">
         Built with React, Vite, and Tailwind · Plays locally in your browser
       </footer>
     </div>

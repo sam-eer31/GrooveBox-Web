@@ -4,11 +4,64 @@
 
 /* App chrome */
 :root {
-  color-scheme: dark;
+  color-scheme: light dark;
 }
 
 html, body, #root {
   height: 100%;
 }
 
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply font-sans;
+  }
+  ::selection {
+    @apply bg-brand-500/30 text-inherit;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl ring-1 ring-black/10 dark:ring-white/10 bg-white/80 dark:bg-black/60 backdrop-blur;
+  }
+  .panel {
+    @apply rounded-xl ring-1 ring-black/10 dark:ring-white/10 bg-white/60 dark:bg-white/5;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-black disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-brand-500 text-black hover:brightness-110 active:brightness-110;
+  }
+  .btn-outline {
+    @apply btn border border-black/20 dark:border-white/20 hover:border-brand-500/60;
+  }
+  .btn-ghost {
+    @apply btn hover:bg-black/5 dark:hover:bg-white/5;
+  }
+  .icon-btn {
+    @apply inline-flex items-center justify-center rounded-md h-9 w-9 border border-black/10 dark:border-white/10 hover:border-brand-500/60 transition outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60;
+  }
+  .input {
+    @apply w-full rounded-md border border-black/20 dark:border-white/15 bg-white dark:bg-black px-3 py-2 text-sm outline-none placeholder:text-black/40 dark:placeholder:text-white/40 focus:border-brand-500/60;
+  }
+  .label {
+    @apply text-xs uppercase tracking-wide text-black/50 dark:text-white/50;
+  }
+  .kbd {
+    @apply rounded-md border border-black/20 dark:border-white/20 bg-black/5 dark:bg-white/10 px-1.5 py-0.5 text-[11px] font-mono;
+  }
+}
+
+@layer utilities {
+  .container-pro {
+    @apply max-w-5xl mx-auto px-4 sm:px-6 lg:px-8;
+  }
+}
 
