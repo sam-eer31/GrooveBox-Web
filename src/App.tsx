@@ -95,6 +95,7 @@ export default function App(): JSX.Element {
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('groovebox_theme') as 'light' | 'dark') || 'dark')
   const [isUploadOpen, setIsUploadOpen] = useState<boolean>(false)
   const [isProgressOpen, setIsProgressOpen] = useState<boolean>(false)
+  const [isRestoringSession, setIsRestoringSession] = useState<boolean>(true)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -1068,9 +1069,53 @@ export default function App(): JSX.Element {
           }
         }
       } catch {}
+      finally {
+        setIsRestoringSession(false)
+      }
     }
+    
+    // Add a timeout to prevent infinite loading
+    const timeout = setTimeout(() => {
+      setIsRestoringSession(false)
+    }, 5000) // 5 second timeout
+    
     void restore()
+    
+    return () => clearTimeout(timeout)
   }, [])
+
+  // Show reconnecting screen while restoring session
+  if (isRestoringSession) {
+    return (
+      <div className={`min-h-full flex flex-col ${theme === 'dark' ? 'bg-black text-white' : 'bg-white text-black'}`}>
+        <header className="border-b border-black/10 dark:border-white/10">
+          <div className="container-pro flex h-16 items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="grid place-items-center">
+                <img src="/favicon/favicon.svg" alt="GrooveBox" className="h-6 w-6 sm:h-7 sm:w-7" />
+              </div>
+              <h1 className="text-base md:text-lg font-semibold tracking-tight">GrooveBox</h1>
+            </div>
+            <button
+              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+              className="icon-btn"
+              aria-label="Toggle theme"
+              title={theme==='dark'?'Switch to light':'Switch to dark'}
+            >
+              {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </button>
+          </div>
+        </header>
+        <main className="flex-1 flex items-center justify-center">
+          <div className="text-center">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-brand-500 mx-auto mb-4"></div>
+            <h2 className="text-xl font-semibold mb-2">Reconnecting to your room...</h2>
+            <p className="text-sm text-black/60 dark:text-white/60">Please wait while we restore your session.</p>
+          </div>
+        </main>
+      </div>
+    )
+  }
 
   // Render based on state; hooks above are unconditional to preserve order
   if (!inRoom) {
@@ -1224,11 +1269,18 @@ export default function App(): JSX.Element {
                   </div>
                   <div className="min-w-0 flex-1 w-full">
                     <p className="hidden sm:block text-[11px] uppercase tracking-wide text-black/60 dark:text-white/60">Now Playing</p>
-                    <h2 className="mt-1 text-[13px] sm:text-base md:text-lg font-semibold truncate text-center sm:text-left" title={fileName}>{fileName}</h2>
+                    {isLoadingLibrary ? (
+                      <div className="mt-1">
+                        <div className="h-4 sm:h-5 md:h-6 bg-black/10 dark:bg-white/10 rounded animate-pulse mb-2"></div>
+                        <div className="h-3 sm:h-4 md:h-5 bg-black/10 dark:bg-white/10 rounded animate-pulse w-3/4"></div>
+                      </div>
+                    ) : (
+                      <h2 className="mt-1 text-[13px] sm:text-base md:text-lg font-semibold truncate text-center sm:text-left" title={fileName}>{fileName}</h2>
+                    )}
                     <div className="mt-2 flex items-center justify-center gap-1.5 sm:gap-3 flex-wrap">
                       <button
                         onClick={goPrevious}
-                        disabled={!hasPrevious}
+                        disabled={!hasPrevious || isLoadingLibrary}
                         className="icon-btn h-8 w-8 sm:h-10 sm:w-10 rounded-full"
                         aria-label="Previous"
                       >
@@ -1236,7 +1288,7 @@ export default function App(): JSX.Element {
                       </button>
                       <button
                         onClick={togglePlay}
-                        disabled={!currentTrack}
+                        disabled={!currentTrack || isLoadingLibrary}
                         className="inline-flex items-center justify-center h-9 w-9 sm:h-12 sm:w-12 rounded-full bg-brand-500 text-black hover:brightness-110 disabled:opacity-50"
                         aria-label={isPlaying ? 'Pause' : 'Play'}
                       >
@@ -1244,7 +1296,7 @@ export default function App(): JSX.Element {
                       </button>
                       <button
                         onClick={goNext}
-                        disabled={!hasNext}
+                        disabled={!hasNext || isLoadingLibrary}
                         className="icon-btn h-8 w-8 sm:h-10 sm:w-10 rounded-full"
                         aria-label="Next"
                       >
@@ -1274,7 +1326,7 @@ export default function App(): JSX.Element {
                     value={currentTime}
                     onChange={(e) => onSeek(Number(e.currentTarget.value))}
                     className="w-full accent-brand-500 touch-pan-x h-2"
-                    disabled={!currentTrack}
+                    disabled={!currentTrack || isLoadingLibrary}
                   />
                   <div className="mt-1 flex justify-between text-[10px] text-black/60 dark:text-white/60">
                     <span>{formatTime(currentTime)}</span>
@@ -1307,9 +1359,22 @@ export default function App(): JSX.Element {
               <div className="panel p-4 sm:p-5">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-xs uppercase tracking-wide text-black/60 dark:text-white/60">Playlist</h3>
-                  <span className="text-[11px] text-black/60 dark:text-white/60">{tracks.length} {tracks.length === 1 ? 'track' : 'tracks'}</span>
+                  <span className="text-[11px] text-black/60 dark:text-white/60">
+                    {isLoadingLibrary ? 'Loading...' : `${tracks.length} ${tracks.length === 1 ? 'track' : 'tracks'}`}
+                  </span>
                 </div>
-                {tracks.length === 0 ? (
+                
+                {isLoadingLibrary ? (
+                  // Loading state for playlist
+                  <div className="space-y-2">
+                    {[...Array(5)].map((_, i) => (
+                      <div key={i} className="flex items-center gap-2.5 sm:gap-3 px-2.5 sm:px-3 py-2">
+                        <div className="w-6 h-3 bg-black/10 dark:bg-white/10 rounded animate-pulse"></div>
+                        <div className="flex-1 h-4 bg-black/10 dark:bg-white/10 rounded animate-pulse"></div>
+                      </div>
+                    ))}
+                  </div>
+                ) : tracks.length === 0 ? (
                   <p className="text-sm text-black/60 dark:text-white/60">No songs yet. Upload MP3 or WAV files to get started.</p>
                 ) : (
                   <ul className="divide-y divide-black/10 dark:divide-white/10 max-h-96 overflow-y-auto">
