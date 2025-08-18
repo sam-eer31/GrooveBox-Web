@@ -13,8 +13,8 @@
     "strict": true,
     "forceConsistentCasingInFileNames": true,
     "baseUrl": ".",
-    "paths": {
-    }
+    "paths": {},
+    "types": ["vite/client"]
   },
   "include": ["src"]
 }

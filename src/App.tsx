@@ -269,8 +269,35 @@ export default function App(): JSX.Element {
     try {
       await audio.play()
       setIsPlaying(true)
+    } catch (err) {
+      // Likely autoplay is blocked until user interacts
+      setPlaybackBlocked(true)
+    }
+  }
+
+  const unlockPlayback = async () => {
+    const audio = audioRef.current
+    if (!audio) { setPlaybackBlocked(false); return }
+    try {
+      const pending = pendingRemotePlayRef.current
+      if (pending) {
+        pendingRemotePlayRef.current = null
+        const { index, time } = pending
+        if (currentIndexRef.current !== index) {
+          setCurrentIndex(index)
+          setCurrentTime(time)
+          shouldAutoplayRef.current = true
+          // Wait a tick for state to propagate and metadata to load
+          await new Promise(resolve => setTimeout(resolve, 0))
+        } else {
+          audio.currentTime = time
+        }
+      }
+      await audio.play()
+      setIsPlaying(true)
+      setPlaybackBlocked(false)
     } catch {
-      // ignore
+      // If still blocked, leave banner visible
     }
   }
 
@@ -462,13 +489,15 @@ export default function App(): JSX.Element {
 
     ch.on('broadcast', { event: 'playlist:add' }, async ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
+      const sb = supabase
+      if (!sb) return
       const items = (payload.items as Array<{ path: string; name: string }>) || []
       const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
       const added: Track[] = []
       for (const it of items) {
         if (it.name === 'meta.json') continue
-        const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(it.path, 60 * 60 * 24 * 7)
-        const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(it.path).data.publicUrl
+        const { data: signed } = await sb.storage.from(bucket).createSignedUrl(it.path, 60 * 60 * 24 * 7)
+        const url = signed?.signedUrl || sb.storage.from(bucket).getPublicUrl(it.path).data.publicUrl
         if (!url) continue
         added.push({ id: it.path, url, name: it.name, path: it.path })
       }
@@ -498,7 +527,11 @@ export default function App(): JSX.Element {
             audio.currentTime = time
             void audio.play()
             setIsPlaying(true)
-          } catch {}
+          } catch (e) {
+            // Autoplay blocked; defer until user unlocks
+            setPlaybackBlocked(true)
+            pendingRemotePlayRef.current = { index, time }
+          }
         }
       }
       // Try to play immediately; if metadata not ready, loadedmetadata handler will also trigger play
@@ -509,7 +542,10 @@ export default function App(): JSX.Element {
             audio.currentTime = time
             void audio.play()
             setIsPlaying(true)
-          } catch {}
+          } catch (e) {
+            setPlaybackBlocked(true)
+            pendingRemotePlayRef.current = { index, time }
+          }
         }
         isApplyingRemoteRef.current = false
       }, 0)
@@ -541,12 +577,16 @@ export default function App(): JSX.Element {
 
     ch.on('broadcast', { event: 'player:next' }, () => {
       isApplyingRemoteRef.current = true
+      const nextIndex = Math.min(tracksRef.current.length - 1, Math.max(0, currentIndexRef.current + 1))
+      pendingRemotePlayRef.current = { index: nextIndex, time: 0 }
       goNext()
       setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
     })
 
     ch.on('broadcast', { event: 'player:previous' }, () => {
       isApplyingRemoteRef.current = true
+      const prevIndex = Math.max(0, Math.min(tracksRef.current.length - 1, currentIndexRef.current - 1))
+      pendingRemotePlayRef.current = { index: prevIndex, time: 0 }
       goPrevious()
       setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
     })
@@ -687,6 +727,12 @@ export default function App(): JSX.Element {
 
       <main className="flex-1">
         <div className="max-w-3xl mx-auto px-6 md:px-8">
+          {playbackBlocked && (
+            <div className="mb-3 rounded-md border border-yellow-500/40 bg-yellow-400/10 text-yellow-200 px-3 py-2 text-sm flex items-center justify-between">
+              <span>Playback is blocked by your browser. Click to enable synced playback.</span>
+              <button onClick={unlockPlayback} className="ml-3 rounded bg-yellow-400 text-slate-900 px-2 py-1 text-xs font-medium">Enable</button>
+            </div>
+          )}
           <div className="flex items-center justify-between">
             <div className="text-sm text-slate-400">You: <span className="font-medium text-slate-200">{displayName || 'Guest'}</span></div>
             <div className="text-sm text-slate-400">Participants: <span className="font-medium text-slate-200">{participants.length + 1}</span></div>
