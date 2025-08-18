@@ -319,6 +319,16 @@ export default function App(): JSX.Element {
         shouldAutoplayRef.current = false
         await playCurrent()
       }
+      // Apply any pending remote play now that metadata is ready
+      if (pendingRemotePlayRef.current) {
+        const { index, time } = pendingRemotePlayRef.current
+        pendingRemotePlayRef.current = null
+        try {
+          audio.currentTime = time
+          await audio.play()
+          setIsPlaying(true)
+        } catch {}
+      }
     }
     audio.addEventListener('loadedmetadata', handleLoaded)
     return () => audio.removeEventListener('loadedmetadata', handleLoaded)
@@ -456,16 +466,26 @@ export default function App(): JSX.Element {
     ch.on('broadcast', { event: 'player:play' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
       const { index, time } = payload as { index: number; time: number }
-      // If we don't yet have tracks or the audio isn't ready, stash and apply after load
+      // If we don't yet have tracks or the index is out of range, queue it
       if (tracks.length === 0 || index >= tracks.length) {
         pendingRemotePlayRef.current = { index, time }
-      } else {
-        isApplyingRemoteRef.current = true
-        setCurrentIndex(index)
-        setCurrentTime(time)
-        shouldAutoplayRef.current = true
-        setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+        return
       }
+      isApplyingRemoteRef.current = true
+      setCurrentIndex(index)
+      setCurrentTime(time)
+      // Try to play immediately; if metadata not ready, loadedmetadata handler will also trigger play
+      setTimeout(() => {
+        const audio = audioRef.current
+        if (audio) {
+          try {
+            audio.currentTime = time
+            void audio.play()
+            setIsPlaying(true)
+          } catch {}
+        }
+        isApplyingRemoteRef.current = false
+      }, 0)
     })
 
     ch.on('broadcast', { event: 'player:pause' }, ({ payload }) => {
