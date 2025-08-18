@@ -442,6 +442,11 @@ export default function App(): JSX.Element {
       try {
         await supabase.storage.from(bucket).remove([`rooms/${roomCode}/meta.json`])
       } catch {}
+      // Write an ended flag so clients won't restore into a deleted room even if some cached URLs exist
+      try {
+        const endedBlob = new Blob([JSON.stringify({ code: roomCode, endedAt: new Date().toISOString() })], { type: 'application/json' })
+        await supabase.storage.from(bucket).upload(`ended/${roomCode}.json`, endedBlob, { upsert: true, cacheControl: 'no-cache' })
+      } catch {}
     } catch {}
     if (channelRef.current) {
       channelRef.current.send({ type: 'broadcast', event: 'room:ended', payload: { sender: clientIdRef.current } })
@@ -489,6 +494,23 @@ export default function App(): JSX.Element {
     }
   }
 
+  const roomEndedFlagExists = async (code: string): Promise<boolean> => {
+    if (!supabase) return false
+    const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
+    try {
+      const { data } = await supabase.storage.from(bucket).download(`ended/${code}.json`)
+      return !!data
+    } catch {
+      return false
+    }
+  }
+
+  const roomIsActive = async (code: string): Promise<boolean> => {
+    const ended = await roomEndedFlagExists(code)
+    if (ended) return false
+    return await roomExists(code)
+  }
+
   const generateUniqueRoomCode = async (): Promise<string> => {
     for (let attempt = 0; attempt < 5; attempt++) {
       const code = generateRoomCode()
@@ -516,6 +538,8 @@ export default function App(): JSX.Element {
       const meta = { roomName: roomTitleInput.trim(), hostName: displayName.trim(), createdAt: new Date().toISOString() }
       const metaBlob = new Blob([JSON.stringify(meta)], { type: 'application/json' })
       await supabase.storage.from(bucket).upload(`rooms/${code}/meta.json`, metaBlob, { upsert: true, cacheControl: 'no-cache' })
+      // Clear any ended flag if it exists for this code reuse (defensive)
+      try { await supabase.storage.from(bucket).remove([`ended/${code}.json`]) } catch {}
       setRoomTitle(meta.roomName || '')
     } catch {}
   }
@@ -527,8 +551,8 @@ export default function App(): JSX.Element {
     if (!code) return
     const validCode = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/.test(code)
     if (!validCode) { setError('Invalid room code'); return }
-    const exists = await roomExists(code)
-    if (!exists) { setError('Room not found'); return }
+    const active = await roomIsActive(code)
+    if (!active) { setError('Room not found or has ended'); return }
     setRoomCode(code)
     setIsHost(false)
     setInRoom(true)
@@ -706,7 +730,7 @@ export default function App(): JSX.Element {
     }
   }, [inRoom, roomCode])
 
-  // Restore session on first render, but only if room still exists
+  // Restore session on first render, but only if room still exists and has not ended
   useEffect(() => {
     const restore = async () => {
       try {
@@ -715,8 +739,8 @@ export default function App(): JSX.Element {
         const savedHost = localStorage.getItem('groovebox_is_host') || '0'
         if (savedName) setDisplayName(savedName)
         if (savedRoom && supabase) {
-          const exists = await roomExists(savedRoom)
-          if (exists) {
+          const active = await roomIsActive(savedRoom)
+          if (active) {
             setRoomCode(savedRoom)
             setInRoom(true)
             setIsHost(savedHost === '1')
