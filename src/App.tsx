@@ -432,15 +432,26 @@ export default function App(): JSX.Element {
         if (batch.length < limit) break
         offset += limit
       }
+      // Attempt to remove the now-empty folder marker by uploading a tombstone and removing it (some providers keep a prefix until a write occurs)
+      try {
+        const tomb = new Blob([" "])
+        await supabase.storage.from(bucket).upload(`rooms/${roomCode}/.tomb`, tomb, { upsert: true })
+        await supabase.storage.from(bucket).remove([`rooms/${roomCode}/.tomb`])
+      } catch {}
     } catch {}
     if (channelRef.current) {
       channelRef.current.send({ type: 'broadcast', event: 'room:ended', payload: { sender: clientIdRef.current } })
     }
     cleanupRoomState()
+    try {
+      localStorage.removeItem('groovebox_room')
+      localStorage.removeItem('groovebox_is_host')
+    } catch {}
   }
 
   const leaveRoom = async () => {
     try { localStorage.removeItem('groovebox_room') } catch {}
+    try { localStorage.removeItem('groovebox_is_host') } catch {}
     if (channelRef.current) {
       channelRef.current.unsubscribe()
       channelRef.current = null
@@ -448,13 +459,13 @@ export default function App(): JSX.Element {
     cleanupRoomState()
   }
 
+  // Do not end the room automatically on refresh/navigation.
+  // Hosts remain hosts after refresh; room persists until explicitly ended.
   useEffect(() => {
-    const handler = () => {
-      if (isHost) void endRoom()
-    }
+    const handler = () => {}
     window.addEventListener('beforeunload', handler)
     return () => window.removeEventListener('beforeunload', handler)
-  }, [isHost, roomCode])
+  }, [])
 
   const generateRoomCode = () => {
     const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -494,6 +505,7 @@ export default function App(): JSX.Element {
     try {
       localStorage.setItem('groovebox_room', code)
       localStorage.setItem('groovebox_name', displayName.trim())
+      localStorage.setItem('groovebox_is_host', '1')
     } catch {}
     try {
       const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
@@ -519,6 +531,7 @@ export default function App(): JSX.Element {
     try {
       localStorage.setItem('groovebox_room', code)
       localStorage.setItem('groovebox_name', displayName.trim())
+      localStorage.setItem('groovebox_is_host', '0')
     } catch {}
   }
 
@@ -690,11 +703,12 @@ export default function App(): JSX.Element {
     try {
       const savedRoom = localStorage.getItem('groovebox_room') || ''
       const savedName = localStorage.getItem('groovebox_name') || ''
+      const savedHost = localStorage.getItem('groovebox_is_host') || '0'
       if (savedName) setDisplayName(savedName)
       if (savedRoom) {
         setRoomCode(savedRoom)
         setInRoom(true)
-        setIsHost(false)
+        setIsHost(savedHost === '1')
       }
     } catch {}
   }, [])
