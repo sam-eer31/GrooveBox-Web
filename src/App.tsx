@@ -160,14 +160,8 @@ export default function App(): JSX.Element {
     try {
       const uploadedTracks: Track[] = []
       for (const file of accepted) {
-        // Clean the filename by removing problematic characters for storage
-        const cleanFileName = file.name
-          .replace(/[\[\]{}()]/g, '') // Remove brackets and braces
-          .replace(/[<>:"|?*]/g, '') // Remove other problematic characters
-          .replace(/\s+/g, ' ') // Replace multiple spaces with single space
-          .trim()
         // Encode the filename to handle special characters safely
-        const encodedFileName = encodeURIComponent(cleanFileName)
+        const encodedFileName = encodeURIComponent(file.name)
         const path = `rooms/${roomCode}/${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}-${encodedFileName}`
         const { error: upErr } = await supabase.storage.from(bucket).upload(path, file, {
           contentType: file.type || 'audio/mpeg',
@@ -193,7 +187,7 @@ export default function App(): JSX.Element {
             id: path,
             file,
             url: pub.publicUrl,
-            name: cleanFileName,
+            name: file.name,
             path
           })
         } else {
@@ -201,7 +195,7 @@ export default function App(): JSX.Element {
             id: path,
             file,
             url: signed.signedUrl,
-            name: cleanFileName,
+            name: file.name,
             path
           })
         }
