@@ -14,7 +14,11 @@ const ACCEPTED_TYPES = [
   'audio/mp3',
   'audio/wav',
   'audio/x-wav',
-  'audio/wave'
+  'audio/wave',
+  'audio/aac',
+  'audio/mp4', // m4a subtype on some platforms
+  'audio/m4a',
+  'audio/x-m4a'
 ]
 
 function formatTime(seconds: number): string {
@@ -92,7 +96,11 @@ export default function App(): JSX.Element {
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
       const lowerName = file.name.toLowerCase()
-      const isAccepted = ACCEPTED_TYPES.includes(file.type) || lowerName.endsWith('.mp3') || lowerName.endsWith('.wav')
+      const isAccepted = ACCEPTED_TYPES.includes(file.type)
+        || lowerName.endsWith('.mp3')
+        || lowerName.endsWith('.wav')
+        || lowerName.endsWith('.m4a')
+        || lowerName.endsWith('.aac')
       if (!isAccepted) {
         unsupported++
       } else {
@@ -512,6 +520,7 @@ export default function App(): JSX.Element {
       const state = ch.presenceState() as Record<string, Array<{ name?: string }>>
       const entries: Array<{ key: string; name: string }> = []
       Object.entries(state).forEach(([key, metas]) => {
+        if (key === clientIdRef.current) return // exclude self from others list
         metas.forEach(meta => entries.push({ key, name: meta?.name || 'Guest' }))
       })
       setParticipants(entries)
@@ -739,20 +748,21 @@ export default function App(): JSX.Element {
             </div>
           </div>
 
-          <button
-            onClick={() => inputRef.current?.click()}
-            className="rounded-md bg-brand-500 text-slate-900 font-medium px-4 py-2 hover:brightness-110 active:brightness-110 transition disabled:opacity-50"
-          >
-            Upload
-          </button>
           <input
+            id="file-input"
             ref={inputRef}
             type="file"
-            accept="audio/mpeg,audio/mp3,audio/wav"
+            accept="audio/*"
             multiple
-            className="hidden"
+            className="sr-only"
             onChange={(e) => onFiles(e.currentTarget.files)}
           />
+          <label
+            htmlFor="file-input"
+            className="rounded-md bg-brand-500 text-slate-900 font-medium px-4 py-2 hover:brightness-110 active:brightness-110 transition cursor-pointer"
+          >
+            Upload
+          </label>
           <div className="ml-3 flex items-center gap-2">
             {isHost ? (
               <button onClick={endRoom} className="rounded-md border border-red-500/60 text-red-300 px-3 py-2 hover:bg-red-500/10">End Room</button>
@@ -787,12 +797,12 @@ export default function App(): JSX.Element {
             className="border-2 border-dashed border-slate-700 rounded-xl p-8 md:p-12 text-center hover:border-brand-500/60 transition"
           >
             <p className="text-slate-300">Drag and drop songs here, or</p>
-            <button
-              onClick={() => inputRef.current?.click()}
-              className="mt-3 rounded-md border border-slate-700 px-4 py-2 hover:border-brand-500/60 hover:text-brand-500 transition"
+            <label
+              htmlFor="file-input"
+              className="mt-3 inline-block rounded-md border border-slate-700 px-4 py-2 hover:border-brand-500/60 hover:text-brand-500 transition cursor-pointer"
             >
               Choose Files
-            </button>
+            </label>
 
             {isUploading && (
               <p className="mt-4 text-sm text-slate-300">Uploading...</p>
@@ -825,9 +835,11 @@ export default function App(): JSX.Element {
                           onClick={() => {
                             setCurrentIndex(idx)
                             setCurrentTime(0)
-                            shouldAutoplayRef.current = false
+                            shouldAutoplayRef.current = true
+                            // Broadcast selection + play for all
                             if (channelRef.current) {
                               channelRef.current.send({ type: 'broadcast', event: 'player:select', payload: { index: idx, sender: clientIdRef.current } })
+                              channelRef.current.send({ type: 'broadcast', event: 'player:play', payload: { index: idx, time: 0, sender: clientIdRef.current } })
                             }
                           }}
                         >
