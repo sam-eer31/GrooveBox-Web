@@ -614,7 +614,16 @@ export default function App(): JSX.Element {
     try {
       // Only load if audio is in error state or not ready
       if (audio.readyState === 0 || audio.error) {
+        console.log('Audio not ready, loading...')
         audio.load()
+        // Wait for load to complete
+        await new Promise((resolve) => {
+          const handleCanPlay = () => {
+            audio.removeEventListener('canplay', handleCanPlay)
+            resolve(undefined)
+          }
+          audio.addEventListener('canplay', handleCanPlay)
+        })
       }
       await audio.play()
       setIsPlaying(true)
@@ -654,20 +663,27 @@ export default function App(): JSX.Element {
   const onLoadedMetadata: React.ReactEventHandler<HTMLAudioElement> = (e) => {
     const el = e.currentTarget
     setDuration(el.duration)
+    console.log('Audio metadata loaded, duration:', el.duration)
+    
     // If a local action requested autoplay, honor it immediately
     if (shouldAutoplayRef.current) {
       shouldAutoplayRef.current = false
+      console.log('Metadata loaded: starting autoplay')
       void playCurrent()
     }
+    
     // Apply any pending remote play now that metadata is ready
     if (pendingRemotePlayRef.current) {
       const { index, time } = pendingRemotePlayRef.current
       pendingRemotePlayRef.current = null
+      console.log('Metadata loaded: applying pending remote play:', { index, time })
       try {
         el.currentTime = time
         void el.play()
         setIsPlaying(true)
-      } catch {
+        console.log('Metadata loaded: pending play started successfully')
+      } catch (e) {
+        console.log('Metadata loaded: pending play failed:', e)
         setPlaybackBlocked(true)
         pendingRemotePlayRef.current = { index, time }
       }
@@ -1081,6 +1097,22 @@ export default function App(): JSX.Element {
                 setCurrentTime(time)
                 shouldAutoplayRef.current = true
                 pendingRemotePlayRef.current = null
+                
+                // Try to start playback if it was supposed to be playing
+                const audio = audioRef.current
+                if (audio && shouldAutoplayRef.current) {
+                  setTimeout(async () => {
+                    try {
+                      audio.currentTime = time
+                      await audio.play()
+                      setIsPlaying(true)
+                      console.log('Pending state sync: playback started')
+                    } catch (e) {
+                      console.log('Pending state sync play failed:', e)
+                      setPlaybackBlocked(true)
+                    }
+                  }, 100)
+                }
               }, 100)
             }
           }
@@ -1289,20 +1321,30 @@ export default function App(): JSX.Element {
         
         if (remoteIsPlaying && !isPlaying) {
           // Host is playing, so we should play too
+          console.log('State sync: host is playing, starting playback')
           shouldAutoplayRef.current = true
           const audio = audioRef.current
-          if (audio && audio.readyState >= 2) { // HAVE_CURRENT_DATA or higher
+          if (audio) {
             try {
               audio.currentTime = time
-              void audio.play()
-              setIsPlaying(true)
+              // Wait a moment for currentTime to be set
+              setTimeout(async () => {
+                try {
+                  await audio.play()
+                  setIsPlaying(true)
+                  console.log('State sync: playback started successfully')
+                } catch (e) {
+                  console.log('State sync play failed:', e)
+                  setPlaybackBlocked(true)
+                }
+              }, 50)
             } catch (e) {
-              console.log('State sync play failed:', e)
-              setPlaybackBlocked(true)
+              console.log('State sync currentTime set failed:', e)
             }
           }
         } else if (!remoteIsPlaying && isPlaying) {
           // Host is paused, so we should pause too
+          console.log('State sync: host is paused, pausing playback')
           const audio = audioRef.current
           if (audio) {
             audio.pause()
