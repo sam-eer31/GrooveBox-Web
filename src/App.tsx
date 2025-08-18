@@ -1285,13 +1285,72 @@ export default function App(): JSX.Element {
             <div className="text-black/60 dark:text-white/60">You: <span className="font-medium text-black dark:text-white">{displayName || 'Guest'}</span></div>
             <div className="text-black/60 dark:text-white/60">Participants: <span className="font-medium text-black dark:text-white">{participants.length + 1}</span></div>
           </div>
-          {participants.length > 0 && (
-            <div className="mb-4 flex flex-wrap gap-2">
-              {participants.map((p, i) => (
-                <span key={p.key + i} className="px-2 py-1 rounded-md text-[11px] bg-black/5 dark:bg-white/10 text-black/70 dark:text-white/70">{p.name}</span>
-              ))}
+          
+          {/* Professional Participants List */}
+          <div className="mb-6">
+            <h3 className="text-xs uppercase tracking-wide text-black/60 dark:text-white/60 mb-3">Connected Users</h3>
+            
+            {/* Current User (You) */}
+            <div className="mb-3">
+              <div className="flex items-center gap-3 p-3 rounded-lg bg-gradient-to-r from-brand-500/10 to-brand-500/5 border border-brand-500/20">
+                <div className="relative">
+                  <div className="w-10 h-10 rounded-full bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center text-white font-semibold text-sm">
+                    {(displayName || 'Guest').charAt(0).toUpperCase()}
+                  </div>
+                  {isHost && (
+                    <div className="absolute -top-1 -right-1 w-5 h-5 bg-yellow-500 rounded-full flex items-center justify-center">
+                      <span className="text-[10px] font-bold text-black">👑</span>
+                    </div>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-black dark:text-white truncate">{displayName || 'Guest'}</span>
+                    {isHost && (
+                      <span className="px-2 py-0.5 bg-yellow-500/20 text-yellow-700 dark:text-yellow-400 text-[10px] font-medium rounded-full border border-yellow-500/30">
+                        HOST
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-black/50 dark:text-white/50">You</p>
+                </div>
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+              </div>
             </div>
-          )}
+
+            {/* Other Participants */}
+            {participants.length > 0 && (
+              <div className="space-y-2">
+                {participants.map((p, i) => (
+                  <div key={p.key + i} className="flex items-center gap-3 p-3 rounded-lg bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/20 hover:bg-black/10 dark:hover:bg-white/15 transition-colors">
+                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-gray-400 to-gray-600 flex items-center justify-center text-white font-semibold text-sm">
+                      {p.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-black dark:text-white truncate">{p.name}</span>
+                      </div>
+                      <p className="text-[11px] text-black/50 dark:text-white/50">Connected</p>
+                    </div>
+                    <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Empty State */}
+            {participants.length === 0 && (
+              <div className="text-center py-6 text-black/40 dark:text-white/40">
+                <div className="w-12 h-12 mx-auto mb-2 rounded-full bg-black/10 dark:bg-white/10 flex items-center justify-center">
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                  </svg>
+                </div>
+                <p className="text-sm">You're the only one here</p>
+                <p className="text-xs mt-1">Share the room code to invite others</p>
+              </div>
+            )}
+          </div>
           {/* Legacy single-toast placeholder removed; using stacked toasts now */}
           {error && inRoom && <div className="hidden"></div>}
 
