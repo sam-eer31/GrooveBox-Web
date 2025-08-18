@@ -1,6 +1,6 @@
 // Service Worker for GrooveBox - Enhanced Background Audio & Sync
 const CACHE_NAME = 'groovebox-v1';
-const KEEP_ALIVE_INTERVAL = 25000; // 25 seconds
+const KEEP_ALIVE_INTERVAL = 10000; // 10 seconds (more aggressive)
 
 // Install event - cache essential resources
 self.addEventListener('install', (event) => {
@@ -44,8 +44,8 @@ async function keepAlive() {
   const clients = await self.clients.matchAll();
   
   clients.forEach((client) => {
-    if (client.url.includes('groovebox') && client.focused === false) {
-      // Send keep-alive message to background tabs
+    if (client.url.includes('groovebox')) {
+      // Send keep-alive message to all clients
       client.postMessage({
         type: 'KEEP_ALIVE',
         timestamp: Date.now()
@@ -63,6 +63,11 @@ self.addEventListener('message', (event) => {
         minInterval: KEEP_ALIVE_INTERVAL
       });
     }
+    
+    // Also set up a more aggressive interval
+    setInterval(() => {
+      keepAlive();
+    }, KEEP_ALIVE_INTERVAL);
   }
   
   if (event.data && event.data.type === 'UNREGISTER_KEEP_ALIVE') {
@@ -151,4 +156,19 @@ self.addEventListener('notificationclick', (event) => {
       })
     );
   }
+});
+
+// More aggressive background processing
+self.addEventListener('backgroundfetchsuccess', (event) => {
+  console.log('Background fetch successful:', event);
+});
+
+// Handle app updates
+self.addEventListener('appinstalled', (event) => {
+  console.log('GrooveBox app installed');
+});
+
+// Handle app launch
+self.addEventListener('applaunch', (event) => {
+  console.log('GrooveBox app launched');
 });
