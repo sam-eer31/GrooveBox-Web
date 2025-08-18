@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { Music, Sun, Moon, Upload as UploadIcon, Power, LogOut, Play, Pause, SkipBack, SkipForward, Volume2 } from 'lucide-react'
 import { supabase } from './lib/supabaseClient'
 
 type Track = {
@@ -43,11 +44,14 @@ export default function App(): JSX.Element {
   const [isUploading, setIsUploading] = useState(false)
   const [isLoadingLibrary, setIsLoadingLibrary] = useState(false)
   const [displayName, setDisplayName] = useState<string>('')
+  const [createName, setCreateName] = useState<string>('')
+  const [joinName, setJoinName] = useState<string>('')
   const [roomTitle, setRoomTitle] = useState<string>('')
   const [roomTitleInput, setRoomTitleInput] = useState<string>('')
   const [participants, setParticipants] = useState<Array<{ key: string; name: string }>>([])
   const [toast, setToast] = useState<string | null>(null)
   const [playbackBlocked, setPlaybackBlocked] = useState<boolean>(false)
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('groovebox_theme') as 'light' | 'dark') || 'dark')
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -78,6 +82,17 @@ export default function App(): JSX.Element {
   // Keep refs in sync to avoid stale closures in realtime handlers
   useEffect(() => { tracksRef.current = tracks }, [tracks])
   useEffect(() => { currentIndexRef.current = currentIndex }, [currentIndex])
+
+  // Theme apply and persist
+  useEffect(() => {
+    try { localStorage.setItem('groovebox_theme', theme) } catch {}
+    const root = document.documentElement
+    if (theme === 'dark') {
+      root.classList.add('dark')
+    } else {
+      root.classList.remove('dark')
+    }
+  }, [theme])
 
   const onFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return
@@ -522,20 +537,23 @@ export default function App(): JSX.Element {
   }
 
   const createRoom = async () => {
+    setError(null)
     if (!supabase) { setError('Supabase not configured'); return }
-    if (!displayName.trim()) { setError('Please enter your name'); return }
+    const name = (createName || displayName).trim()
+    if (!name) { setError('Please enter your name'); return }
     const code = await generateUniqueRoomCode()
     setRoomCode(code)
     setIsHost(true)
     setInRoom(true)
+    setError(null)
     try {
       localStorage.setItem('groovebox_room', code)
-      localStorage.setItem('groovebox_name', displayName.trim())
+      localStorage.setItem('groovebox_name', name)
       localStorage.setItem('groovebox_is_host', '1')
     } catch {}
     try {
       const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
-      const meta = { roomName: roomTitleInput.trim(), hostName: displayName.trim(), createdAt: new Date().toISOString() }
+      const meta = { roomName: roomTitleInput.trim(), hostName: name, createdAt: new Date().toISOString() }
       const metaBlob = new Blob([JSON.stringify(meta)], { type: 'application/json' })
       await supabase.storage.from(bucket).upload(`rooms/${code}/meta.json`, metaBlob, { upsert: true, cacheControl: 'no-cache' })
       // Clear any ended flag if it exists for this code reuse (defensive)
@@ -545,9 +563,11 @@ export default function App(): JSX.Element {
   }
 
   const joinRoom = async () => {
+    setError(null)
     if (!supabase) { setError('Supabase not configured'); return }
     const code = joinCodeInput.trim().toUpperCase()
-    if (!displayName.trim()) { setError('Please enter your name'); return }
+    const name = (joinName || displayName).trim()
+    if (!name) { setError('Please enter your name'); return }
     if (!code) return
     const validCode = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/.test(code)
     if (!validCode) { setError('Invalid room code'); return }
@@ -556,9 +576,10 @@ export default function App(): JSX.Element {
     setRoomCode(code)
     setIsHost(false)
     setInRoom(true)
+    setError(null)
     try {
       localStorage.setItem('groovebox_room', code)
-      localStorage.setItem('groovebox_name', displayName.trim())
+      localStorage.setItem('groovebox_name', name)
       localStorage.setItem('groovebox_is_host', '0')
     } catch {}
   }
@@ -761,47 +782,50 @@ export default function App(): JSX.Element {
   // Render based on state; hooks above are unconditional to preserve order
   if (!inRoom) {
     return (
-      <div className="min-h-full flex flex-col">
+      <div className={`min-h-full flex flex-col ${theme === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-white text-slate-900'}`}>
         <header className="p-6 md:p-8">
           <div className="max-w-3xl mx-auto flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="h-8 w-8 rounded-md bg-brand-500/20 ring-1 ring-brand-500/30 grid place-items-center">
-                <span className="text-brand-500 font-bold">♪</span>
+                <Music className="h-4 w-4 text-brand-500" />
               </div>
               <h1 className="text-xl font-semibold tracking-tight">GrooveBox Rooms</h1>
             </div>
+            <button onClick={()=>setTheme(theme==='dark'?'light':'dark')} className="rounded-md border border-slate-700 px-3 py-2 text-sm hover:border-brand-500/60 inline-flex items-center gap-2">
+              {theme==='dark'? 'Light' : 'Dark'} Mode
+            </button>
           </div>
         </header>
         <main className="flex-1">
           <div className="max-w-3xl mx-auto px-6 md:px-8 grid md:grid-cols-2 gap-6">
-            <div className="bg-slate-800/60 rounded-xl p-6 ring-1 ring-white/5">
+            <div className={`${theme==='dark'?'bg-slate-800/60 ring-white/5':'bg-slate-100 ring-slate-300'} rounded-xl p-6 ring-1`}>
               <h2 className="font-semibold">Create a Room</h2>
               <p className="mt-1 text-sm text-slate-400">Host a synced listening session.</p>
               <div className="mt-4 grid gap-3">
                 <div className="grid gap-1.5">
                   <label className="text-xs text-slate-400">Your Name</label>
-                  <input value={displayName} onChange={(e)=>setDisplayName(e.currentTarget.value)} placeholder="e.g. Alex" className="rounded-md bg-slate-900 border border-slate-700 px-3 py-2 outline-none focus:border-brand-500/60" />
+                  <input value={createName} onChange={(e)=>setCreateName(e.currentTarget.value)} placeholder="e.g. Alex" className={`rounded-md ${theme==='dark'?'bg-slate-900 border-slate-700':'bg-white border-slate-300'} border px-3 py-2 outline-none focus:border-brand-500/60`} />
                 </div>
                 <div className="grid gap-1.5">
                   <label className="text-xs text-slate-400">Room Name (optional)</label>
-                  <input value={roomTitleInput} onChange={(e)=>setRoomTitleInput(e.currentTarget.value)} placeholder="e.g. Friday Jam" className="rounded-md bg-slate-900 border border-slate-700 px-3 py-2 outline-none focus:border-brand-500/60" />
+                  <input value={roomTitleInput} onChange={(e)=>setRoomTitleInput(e.currentTarget.value)} placeholder="e.g. Friday Jam" className={`rounded-md ${theme==='dark'?'bg-slate-900 border-slate-700':'bg-white border-slate-300'} border px-3 py-2 outline-none focus:border-brand-500/60`} />
                 </div>
                 <button onClick={createRoom} className="mt-2 rounded-md bg-brand-500 text-slate-900 font-medium px-4 py-2">Create Room</button>
               </div>
             </div>
-            <div className="bg-slate-800/60 rounded-xl p-6 ring-1 ring-white/5">
+            <div className={`${theme==='dark'?'bg-slate-800/60 ring-white/5':'bg-slate-100 ring-slate-300'} rounded-xl p-6 ring-1`}>
               <h2 className="font-semibold">Join a Room</h2>
               <p className="mt-1 text-sm text-slate-400">Enter a room code to join.</p>
               <div className="mt-4 grid gap-3">
                 <div className="grid gap-1.5">
                   <label className="text-xs text-slate-400">Your Name</label>
-                  <input value={displayName} onChange={(e)=>setDisplayName(e.currentTarget.value)} placeholder="e.g. Alex" className="rounded-md bg-slate-900 border border-slate-700 px-3 py-2 outline-none focus:border-brand-500/60" />
+                  <input value={joinName} onChange={(e)=>setJoinName(e.currentTarget.value)} placeholder="e.g. Alex" className={`rounded-md ${theme==='dark'?'bg-slate-900 border-slate-700':'bg-white border-slate-300'} border px-3 py-2 outline-none focus:border-brand-500/60`} />
                 </div>
                 <div className="flex gap-2">
-                  <input value={joinCodeInput} onChange={(e)=>setJoinCodeInput(e.currentTarget.value)} placeholder="Enter room code" className="flex-1 rounded-md bg-slate-900 border border-slate-700 px-3 py-2 outline-none focus:border-brand-500/60" />
-                  <button onClick={joinRoom} className="rounded-md border border-slate-700 px-4 py-2 hover:border-brand-500/60">Join</button>
+                  <input value={joinCodeInput} onChange={(e)=>setJoinCodeInput(e.currentTarget.value)} placeholder="Enter room code" className={`flex-1 rounded-md ${theme==='dark'?'bg-slate-900 border-slate-700':'bg-white border-slate-300'} border px-3 py-2 outline-none focus:border-brand-500/60 font-mono tracking-widest`} />
+                  <button onClick={joinRoom} className={`rounded-md border px-4 py-2 hover:border-brand-500/60 ${theme==='dark'?'border-slate-700':'border-slate-300'}`}>Join</button>
                 </div>
-                {error && <p className="text-sm text-red-400">{error}</p>}
+                {error && <p className="text-sm text-red-400" role="alert" aria-live="polite">{error}</p>}
               </div>
             </div>
           </div>
@@ -813,18 +837,21 @@ export default function App(): JSX.Element {
   
 
   return (
-    <div className="min-h-full flex flex-col">
+    <div className={`min-h-full flex flex-col ${theme==='dark'?'bg-slate-950 text-slate-100':'bg-white text-slate-900'}`}>
       <header className="p-6 md:p-8">
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="h-8 w-8 rounded-md bg-brand-500/20 ring-1 ring-brand-500/30 grid place-items-center">
-              <span className="text-brand-500 font-bold">♪</span>
+              <Music className="h-4 w-4 text-brand-500" />
             </div>
             <div>
               <h1 className="text-xl font-semibold tracking-tight">GrooveBox</h1>
               <p className="text-xs text-slate-400">Room: <span className="font-mono">{roomCode}</span> {isHost && <span className="ml-2 text-brand-500">(Host)</span>} {roomTitle && <span className="ml-2">· {roomTitle}</span>}</p>
             </div>
           </div>
+          <button onClick={()=>setTheme(theme==='dark'?'light':'dark')} className="rounded-md border px-3 py-2 text-sm hover:border-brand-500/60 ${theme==='dark'?'border-slate-700':'border-slate-300'}">
+            {theme==='dark'?'Light':'Dark'} Mode
+          </button>
 
           <input
             id="file-input"
@@ -837,16 +864,16 @@ export default function App(): JSX.Element {
           />
           <label
             htmlFor="file-input"
-            className="rounded-md bg-brand-500 text-slate-900 font-medium px-4 py-2 hover:brightness-110 active:brightness-110 transition cursor-pointer"
+            className="rounded-md bg-brand-500 text-slate-900 font-medium px-4 py-2 hover:brightness-110 active:brightness-110 transition cursor-pointer inline-flex items-center gap-2"
             onClick={() => { if (inputRef.current) inputRef.current.value = '' }}
           >
-            Upload
+            <UploadIcon className="h-4 w-4" /> Upload
           </label>
           <div className="ml-3 flex items-center gap-2">
             {isHost ? (
-              <button onClick={endRoom} className="rounded-md border border-red-500/60 text-red-300 px-3 py-2 hover:bg-red-500/10">End Room</button>
+              <button onClick={endRoom} className="rounded-md border border-red-500/60 text-red-300 px-3 py-2 hover:bg-red-500/10 inline-flex items-center gap-2">End Room</button>
             ) : (
-              <button onClick={leaveRoom} className="rounded-md border border-slate-700 px-3 py-2 hover:border-brand-500/60">Leave</button>
+              <button onClick={leaveRoom} className="rounded-md border border-slate-700 px-3 py-2 hover:border-brand-500/60 inline-flex items-center gap-2">Leave</button>
             )}
           </div>
         </div>
@@ -870,6 +897,8 @@ export default function App(): JSX.Element {
             </div>
           )}
           {toast && <div className="mt-2 text-xs text-slate-300">{toast}</div>}
+          {/* Clear any stale error when entering in-room view */}
+          {error && inRoom && <div className="hidden">{setTimeout(()=>setError(null),0)}</div>}
           <div
             onDrop={onDrop}
             onDragOver={onDragOver}
@@ -956,7 +985,7 @@ export default function App(): JSX.Element {
                     className="h-10 w-10 rounded-full bg-slate-700 text-slate-200 grid place-items-center disabled:opacity-40"
                     aria-label="Previous"
                   >
-                    «
+                    <SkipBack className="h-4 w-4" />
                   </button>
                   <button
                     onClick={togglePlay}
@@ -964,7 +993,7 @@ export default function App(): JSX.Element {
                     className="h-10 w-10 rounded-full bg-brand-500 text-slate-900 grid place-items-center disabled:opacity-50"
                     aria-label={isPlaying ? 'Pause' : 'Play'}
                   >
-                    {isPlaying ? '❚❚' : '►'}
+                    {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
                   </button>
                   <button
                     onClick={goNext}
@@ -972,7 +1001,7 @@ export default function App(): JSX.Element {
                     className="h-10 w-10 rounded-full bg-slate-700 text-slate-200 grid place-items-center disabled:opacity-40"
                     aria-label="Next"
                   >
-                    »
+                    <SkipForward className="h-4 w-4" />
                   </button>
                 </div>
               </div>
