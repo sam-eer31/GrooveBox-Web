@@ -472,6 +472,7 @@ export default function App(): JSX.Element {
         return
       }
       isApplyingRemoteRef.current = true
+      shouldAutoplayRef.current = true
       setCurrentIndex(index)
       setCurrentTime(time)
       // Try to play immediately; if metadata not ready, loadedmetadata handler will also trigger play
@@ -498,6 +499,7 @@ export default function App(): JSX.Element {
         audio.currentTime = time
       }
       setIsPlaying(false)
+      shouldAutoplayRef.current = false
       setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
     })
 
