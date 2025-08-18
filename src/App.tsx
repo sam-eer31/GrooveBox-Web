@@ -128,7 +128,6 @@ export default function App(): JSX.Element {
   const uploadCancelRef = useRef<boolean>(false)
   const uploadedPathsRef = useRef<string[]>([])
   const clientIdToNameRef = useRef<Map<string, string>>(new Map())
-  const currentTimeRef = useRef<number>(0)
 
   // Toast helpers bound to state
   const addToast = (message: string, type: Toast['type'] = 'info', duration: number = 3000) => {
@@ -159,7 +158,6 @@ export default function App(): JSX.Element {
   // Keep refs in sync to avoid stale closures in realtime handlers
   useEffect(() => { tracksRef.current = tracks }, [tracks])
   useEffect(() => { currentIndexRef.current = currentIndex }, [currentIndex])
-  useEffect(() => { currentTimeRef.current = currentTime }, [currentTime])
 
   // Theme apply and persist
   useEffect(() => {
@@ -589,29 +587,23 @@ export default function App(): JSX.Element {
   const togglePlay = async () => {
     const audio = audioRef.current
     if (!audio) return
+    
     // Don't broadcast if we're applying a remote change
     if (isApplyingRemoteRef.current) return
-    console.log('togglePlay called:', { paused: audio.paused, currentTime: audio.currentTime, readyState: audio.readyState, src: audio.src })
+    
     if (audio.paused) {
       try {
-        // Force-set resume position to avoid any implicit resets
-        const resumeAt = audio.currentTime > 0 ? audio.currentTime : currentTimeRef.current
-        if (Math.abs(audio.currentTime - resumeAt) > 0.05) {
-          audio.currentTime = resumeAt
-        }
-        console.log('Starting playback from currentTime:', resumeAt)
+        // Don't call audio.load() here - it resets the currentTime!
         await audio.play()
         setIsPlaying(true)
-        broadcastState('play', { index: Math.max(0, currentIndexRef.current), time: resumeAt })
+        broadcastState('play', { index: Math.max(0, currentIndexRef.current), time: audio.currentTime })
       } catch (err) {
         console.warn('Playback error:', err)
         setError('Unable to play the audio. Please try again.')
       }
     } else {
-      console.log('Pausing playback at currentTime:', audio.currentTime)
       audio.pause()
       setIsPlaying(false)
-      setCurrentTime(audio.currentTime)
       broadcastState('pause', { time: audio.currentTime })
     }
   }
@@ -621,20 +613,8 @@ export default function App(): JSX.Element {
     if (!audio) return
     try {
       // Only load if audio is in error state or not ready
-      // Don't load if we have a currentTime set (means we're resuming)
-      if ((audio.readyState === 0 || audio.error) && audio.currentTime === 0) {
-        console.log('Audio not ready and no currentTime, loading...')
+      if (audio.readyState === 0 || audio.error) {
         audio.load()
-        // Wait for load to complete
-        await new Promise((resolve) => {
-          const handleCanPlay = () => {
-            audio.removeEventListener('canplay', handleCanPlay)
-            resolve(undefined)
-          }
-          audio.addEventListener('canplay', handleCanPlay)
-        })
-      } else if (audio.readyState === 0 && audio.currentTime > 0) {
-        console.log('Audio paused but has currentTime, not loading to preserve position')
       }
       await audio.play()
       setIsPlaying(true)
@@ -674,35 +654,20 @@ export default function App(): JSX.Element {
   const onLoadedMetadata: React.ReactEventHandler<HTMLAudioElement> = (e) => {
     const el = e.currentTarget
     setDuration(el.duration)
-    console.log('Audio metadata loaded, duration:', el.duration)
-    
     // If a local action requested autoplay, honor it immediately
     if (shouldAutoplayRef.current) {
       shouldAutoplayRef.current = false
-      console.log('Metadata loaded: starting autoplay')
-      // Don't call playCurrent here as it might reset position
-      // Instead, just play directly
-      try {
-        void el.play()
-        setIsPlaying(true)
-      } catch (e) {
-        console.log('Metadata loaded: direct play failed:', e)
-        setPlaybackBlocked(true)
-      }
+      void playCurrent()
     }
-    
     // Apply any pending remote play now that metadata is ready
     if (pendingRemotePlayRef.current) {
       const { index, time } = pendingRemotePlayRef.current
       pendingRemotePlayRef.current = null
-      console.log('Metadata loaded: applying pending remote play:', { index, time })
       try {
         el.currentTime = time
         void el.play()
         setIsPlaying(true)
-        console.log('Metadata loaded: pending play started successfully')
-      } catch (e) {
-        console.log('Metadata loaded: pending play failed:', e)
+      } catch {
         setPlaybackBlocked(true)
         pendingRemotePlayRef.current = { index, time }
       }
@@ -710,7 +675,6 @@ export default function App(): JSX.Element {
   }
 
   const onTimeUpdate: React.ReactEventHandler<HTMLAudioElement> = (e) => {
-    currentTimeRef.current = e.currentTarget.currentTime
     setCurrentTime(e.currentTarget.currentTime)
   }
 
@@ -756,23 +720,6 @@ export default function App(): JSX.Element {
       channelRef.current.send({ type: 'broadcast', event: 'player:next', payload: { sender: clientIdRef.current } })
     }
   }
-
-  // Preserve currentTime when track changes (for pause/resume scenarios)
-  useEffect(() => {
-    const audio = audioRef.current
-    if (!audio || !currentTrack) return
-    // If we have a currentTime > 0, preserve it when the track changes
-    if (currentTimeRef.current > 0) {
-      const preservedTime = currentTimeRef.current
-      console.log('Track changed, preserving currentTime:', preservedTime)
-      const handleCanPlay = () => {
-        audio.removeEventListener('canplay', handleCanPlay)
-        audio.currentTime = preservedTime
-        console.log('Restored currentTime after track change:', preservedTime)
-      }
-      audio.addEventListener('canplay', handleCanPlay)
-    }
-  }, [currentTrack?.url, currentTime])
 
   // When metadata loads for a new track, autoplay if flagged
   useEffect(() => {
@@ -1078,26 +1025,6 @@ export default function App(): JSX.Element {
       const name = newPresences?.[0]?.name || clientIdToNameRef.current.get(key) || 'Guest'
       clientIdToNameRef.current.set(key, name)
       addToast(`${name} joined the room`, 'success')
-      
-      // If this is a new user joining (not us), and we're the host, send them current state
-      if (key !== clientIdRef.current && isHost) {
-        console.log('New user joined, sending current state to:', name)
-        const audio = audioRef.current
-        const currentTime = audio ? audio.currentTime : 0
-        
-        // Send current state to the new user
-        ch.send({
-          type: 'broadcast',
-          event: 'player:state_response',
-          payload: {
-            index: currentIndexRef.current,
-            time: currentTime,
-            isPlaying: isPlaying,
-            sender: clientIdRef.current,
-            target: key
-          }
-        })
-      }
     })
     ch.on('presence', { event: 'leave' }, ({ key, leftPresences }) => {
       const name = leftPresences?.[0]?.name || clientIdToNameRef.current.get(key) || 'Guest'
@@ -1121,41 +1048,7 @@ export default function App(): JSX.Element {
         added.push({ id: it.path, url, name: it.name, path: it.path })
       }
       if (added.length > 0) {
-        setTracks(prev => {
-          const newTracks = [...prev, ...added]
-          
-          // Check if we have pending state sync that we can now apply
-          if (pendingRemotePlayRef.current && newTracks.length > 0) {
-            const { index, time } = pendingRemotePlayRef.current
-            if (index >= 0 && index < newTracks.length) {
-              console.log('Tracks loaded, applying pending state sync:', { index, time })
-              setTimeout(() => {
-                setCurrentIndex(index)
-                setCurrentTime(time)
-                shouldAutoplayRef.current = true
-                pendingRemotePlayRef.current = null
-                
-                // Try to start playback if it was supposed to be playing
-                const audio = audioRef.current
-                if (audio && shouldAutoplayRef.current) {
-                  setTimeout(async () => {
-                    try {
-                      audio.currentTime = time
-                      await audio.play()
-                      setIsPlaying(true)
-                      console.log('Pending state sync: playback started')
-                    } catch (e) {
-                      console.log('Pending state sync play failed:', e)
-                      setPlaybackBlocked(true)
-                    }
-                  }, 100)
-                }
-              }, 100)
-            }
-          }
-          
-          return newTracks
-        })
+        setTracks(prev => [...prev, ...added])
         addToast(`${added.length} track(s) added`, 'success')
       }
     })
@@ -1329,14 +1222,7 @@ export default function App(): JSX.Element {
         target: string;
       }
       
-      console.log('Syncing with host state:', { index, time, remoteIsPlaying, currentIndex: currentIndexRef.current, tracksLength: tracksRef.current.length })
-      
-      // If we don't have tracks yet, queue the state for later
-      if (tracksRef.current.length === 0) {
-        console.log('No tracks loaded yet, queuing state sync')
-        pendingRemotePlayRef.current = { index, time }
-        return
-      }
+      console.log('Syncing with host state:', { index, time, remoteIsPlaying, currentIndex: currentIndexRef.current })
       
       // Update local state to match host
       if (index >= 0 && index < tracksRef.current.length) {
@@ -1358,30 +1244,20 @@ export default function App(): JSX.Element {
         
         if (remoteIsPlaying && !isPlaying) {
           // Host is playing, so we should play too
-          console.log('State sync: host is playing, starting playback')
           shouldAutoplayRef.current = true
           const audio = audioRef.current
-          if (audio) {
+          if (audio && audio.readyState >= 2) { // HAVE_CURRENT_DATA or higher
             try {
               audio.currentTime = time
-              // Wait a moment for currentTime to be set
-              setTimeout(async () => {
-                try {
-                  await audio.play()
-                  setIsPlaying(true)
-                  console.log('State sync: playback started successfully')
-                } catch (e) {
-                  console.log('State sync play failed:', e)
-                  setPlaybackBlocked(true)
-                }
-              }, 50)
+              void audio.play()
+              setIsPlaying(true)
             } catch (e) {
-              console.log('State sync currentTime set failed:', e)
+              console.log('State sync play failed:', e)
+              setPlaybackBlocked(true)
             }
           }
         } else if (!remoteIsPlaying && isPlaying) {
           // Host is paused, so we should pause too
-          console.log('State sync: host is paused, pausing playback')
           const audio = audioRef.current
           if (audio) {
             audio.pause()
@@ -1391,8 +1267,6 @@ export default function App(): JSX.Element {
         
         setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
         addToast('Synced with host player state', 'info')
-      } else {
-        console.log('Invalid index received:', index, 'tracks length:', tracksRef.current.length)
       }
     })
 
@@ -1430,29 +1304,6 @@ export default function App(): JSX.Element {
       if (status === 'SUBSCRIBED') {
         // Track self presence with name
         await ch.track({ name: displayName || 'Guest' })
-        
-        // If we're not the host, immediately request current state
-        if (!isHost) {
-          console.log('Joined room, requesting current state from host')
-          
-          // Function to request state with retry
-          const requestState = () => {
-            ch.send({
-              type: 'broadcast',
-              event: 'player:request_state',
-              payload: { sender: clientIdRef.current }
-            })
-          }
-          
-          // Initial request after a small delay
-          setTimeout(requestState, 500)
-          
-          // Retry after 2 seconds if no response
-          setTimeout(requestState, 2000)
-          
-          // Final retry after 5 seconds
-          setTimeout(requestState, 5000)
-        }
       }
     })
     channelRef.current = ch
@@ -1610,12 +1461,8 @@ export default function App(): JSX.Element {
       // Resume audio context if suspended (mobile backgrounding)
       const resumeAudioContext = async () => {
         try {
-          // Only load if we don't have a currentTime set (preserve position)
-          if (audio.readyState === 0 && audio.currentTime === 0) { // HAVE_NOTHING
-            console.log('Resuming audio context, loading...')
+          if (audio.readyState === 0) { // HAVE_NOTHING
             await audio.load()
-          } else if (audio.readyState === 0 && audio.currentTime > 0) {
-            console.log('Audio paused with currentTime, not loading to preserve position')
           }
         } catch (error) {
           console.log('Audio context resume failed:', error)
@@ -2151,21 +1998,6 @@ export default function App(): JSX.Element {
                       setIsPlaying(false)
                       setCurrentTime(0)
                       shouldAutoplayRef.current = false
-                    }
-                  }}
-                  onLoadStart={() => {
-                    // Preserve currentTime when src changes
-                    const audio = audioRef.current
-                    if (audio && currentTime > 0) {
-                      console.log('Audio src changing, preserving currentTime:', currentTime)
-                      // Store the current time to restore it after load
-                      const preservedTime = currentTime
-                      const handleCanPlay = () => {
-                        audio.removeEventListener('canplay', handleCanPlay)
-                        audio.currentTime = preservedTime
-                        console.log('Restored currentTime after src change:', preservedTime)
-                      }
-                      audio.addEventListener('canplay', handleCanPlay)
                     }
                   }}
                   className="hidden"
