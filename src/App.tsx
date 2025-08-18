@@ -30,10 +30,12 @@ function formatTime(seconds: number): string {
 }
 
 function deriveDisplayNameFromObjectName(objectName: string): string {
+  // Decode URL-encoded filename first
+  const decodedName = decodeURIComponent(objectName)
   // Matches UUID prefixes we add during upload: <uuid>-<original-name>
   const uuidPrefixPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}-(.+)$/
-  const match = objectName.match(uuidPrefixPattern)
-  return match ? match[1] : objectName
+  const match = decodedName.match(uuidPrefixPattern)
+  return match ? match[1] : decodedName
 }
 
 export default function App(): JSX.Element {
@@ -110,6 +112,14 @@ export default function App(): JSX.Element {
     return () => window.removeEventListener('keydown', onKey)
   }, [isUploadOpen])
 
+  // Auto-clear errors after a delay
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(null), 5000)
+      return () => clearTimeout(timer)
+    }
+  }, [error])
+
   const onFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return
 
@@ -150,7 +160,9 @@ export default function App(): JSX.Element {
     try {
       const uploadedTracks: Track[] = []
       for (const file of accepted) {
-        const path = `rooms/${roomCode}/${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}-${file.name}`
+        // Encode the filename to handle special characters safely
+        const encodedFileName = encodeURIComponent(file.name)
+        const path = `rooms/${roomCode}/${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}-${encodedFileName}`
         const { error: upErr } = await supabase.storage.from(bucket).upload(path, file, {
           contentType: file.type || 'audio/mpeg',
           upsert: false
@@ -161,10 +173,12 @@ export default function App(): JSX.Element {
         }
 
         // Prefer signed URL so it works even if bucket is private
-        const { data: signed, error: signErr } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
+        // Ensure the path is properly encoded for URL generation
+        const encodedPath = path.split('/').map(segment => encodeURIComponent(segment)).join('/')
+        const { data: signed, error: signErr } = await supabase.storage.from(bucket).createSignedUrl(encodedPath, 60 * 60 * 24 * 7)
         if (signErr || !signed?.signedUrl) {
           // Try public URL fallback
-          const { data: pub } = supabase.storage.from(bucket).getPublicUrl(path)
+          const { data: pub } = supabase.storage.from(bucket).getPublicUrl(encodedPath)
           if (!pub?.publicUrl) {
             setError(`Could not generate URL for ${file.name}`)
             continue
@@ -274,8 +288,10 @@ export default function App(): JSX.Element {
           if (f.name === 'meta.json') continue
           if (f.name === 'tracks.json') continue
           const path = `${prefix}/${f.name}`
-          const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
-          const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl
+          // Ensure the path is properly encoded for URL generation
+          const encodedPath = path.split('/').map(segment => encodeURIComponent(segment)).join('/')
+          const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(encodedPath, 60 * 60 * 24 * 7)
+          const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(encodedPath).data.publicUrl
           if (!url) continue
           const displayName = nameByPath.get(path) || deriveDisplayNameFromObjectName(f.name)
           loaded.push({ id: path, url, name: displayName, path })
@@ -680,8 +696,10 @@ export default function App(): JSX.Element {
       const added: Track[] = []
       for (const it of items) {
         if (it.name === 'meta.json') continue
-        const { data: signed } = await sb.storage.from(bucket).createSignedUrl(it.path, 60 * 60 * 24 * 7)
-        const url = signed?.signedUrl || sb.storage.from(bucket).getPublicUrl(it.path).data.publicUrl
+        // Ensure the path is properly encoded for URL generation
+        const encodedPath = it.path.split('/').map(segment => encodeURIComponent(segment)).join('/')
+        const { data: signed } = await sb.storage.from(bucket).createSignedUrl(encodedPath, 60 * 60 * 24 * 7)
+        const url = signed?.signedUrl || sb.storage.from(bucket).getPublicUrl(encodedPath).data.publicUrl
         if (!url) continue
         added.push({ id: it.path, url, name: it.name, path: it.path })
       }
@@ -974,7 +992,7 @@ export default function App(): JSX.Element {
             </div>
           )}
           {toast && <div className="mb-3 text-xs text-black/70 dark:text-white/70">{toast}</div>}
-          {error && inRoom && <div className="hidden">{setTimeout(()=>setError(null),0)}</div>}
+          {error && inRoom && <div className="hidden"></div>}
 
           <div className="grid lg:grid-cols-3 gap-4 sm:gap-6">
             <div className="lg:col-span-2 min-w-0">
