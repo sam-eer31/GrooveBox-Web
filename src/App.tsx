@@ -389,9 +389,22 @@ export default function App(): JSX.Element {
     if (!isHost || !supabase || !roomCode) return
     const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
     try {
-      const { data: files } = await supabase.storage.from(bucket).list(`rooms/${roomCode}`, { limit: 100 })
-      const paths = (files || []).map(f => `rooms/${roomCode}/${f.name}`)
-      if (paths.length > 0) await supabase.storage.from(bucket).remove(paths)
+      const limit = 100
+      let offset = 0
+      while (true) {
+        const { data: files, error: listErr } = await supabase.storage.from(bucket).list(`rooms/${roomCode}`, { limit, offset, sortBy: { column: 'name', order: 'asc' } })
+        if (listErr) break
+        const batch = (files || []).map(f => `rooms/${roomCode}/${f.name}`)
+        if (batch.length === 0) break
+        // Remove in chunks to avoid limits
+        const chunkSize = 100
+        for (let i = 0; i < batch.length; i += chunkSize) {
+          const chunk = batch.slice(i, i + chunkSize)
+          await supabase.storage.from(bucket).remove(chunk)
+        }
+        if (batch.length < limit) break
+        offset += limit
+      }
     } catch {}
     if (channelRef.current) {
       channelRef.current.send({ type: 'broadcast', event: 'room:ended', payload: { sender: clientIdRef.current } })
@@ -423,10 +436,31 @@ export default function App(): JSX.Element {
     return code
   }
 
+  const roomExists = async (code: string): Promise<boolean> => {
+    if (!supabase) return false
+    const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
+    try {
+      const { data } = await supabase.storage.from(bucket).download(`rooms/${code}/meta.json`)
+      return !!data
+    } catch {
+      return false
+    }
+  }
+
+  const generateUniqueRoomCode = async (): Promise<string> => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const code = generateRoomCode()
+      if (!supabase) return code
+      const exists = await roomExists(code)
+      if (!exists) return code
+    }
+    return generateRoomCode()
+  }
+
   const createRoom = async () => {
     if (!supabase) { setError('Supabase not configured'); return }
     if (!displayName.trim()) { setError('Please enter your name'); return }
-    const code = generateRoomCode()
+    const code = await generateUniqueRoomCode()
     setRoomCode(code)
     setIsHost(true)
     setInRoom(true)
@@ -448,6 +482,10 @@ export default function App(): JSX.Element {
     const code = joinCodeInput.trim().toUpperCase()
     if (!displayName.trim()) { setError('Please enter your name'); return }
     if (!code) return
+    const validCode = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/.test(code)
+    if (!validCode) { setError('Invalid room code'); return }
+    const exists = await roomExists(code)
+    if (!exists) { setError('Room not found'); return }
     setRoomCode(code)
     setIsHost(false)
     setInRoom(true)
