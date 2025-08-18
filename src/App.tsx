@@ -591,9 +591,17 @@ export default function App(): JSX.Element {
     // Don't broadcast if we're applying a remote change
     if (isApplyingRemoteRef.current) return
     
+    console.log('togglePlay called:', { 
+      paused: audio.paused, 
+      currentTime: audio.currentTime, 
+      readyState: audio.readyState,
+      src: audio.src 
+    })
+    
     if (audio.paused) {
       try {
         // Don't call audio.load() here - it resets the currentTime!
+        console.log('Starting playback from currentTime:', audio.currentTime)
         await audio.play()
         setIsPlaying(true)
         broadcastState('play', { index: Math.max(0, currentIndexRef.current), time: audio.currentTime })
@@ -602,6 +610,7 @@ export default function App(): JSX.Element {
         setError('Unable to play the audio. Please try again.')
       }
     } else {
+      console.log('Pausing playback at currentTime:', audio.currentTime)
       audio.pause()
       setIsPlaying(false)
       broadcastState('pause', { time: audio.currentTime })
@@ -747,6 +756,24 @@ export default function App(): JSX.Element {
       channelRef.current.send({ type: 'broadcast', event: 'player:next', payload: { sender: clientIdRef.current } })
     }
   }
+
+  // Preserve currentTime when track changes (for pause/resume scenarios)
+  useEffect(() => {
+    const audio = audioRef.current
+    if (!audio || !currentTrack) return
+    
+    // If we have a currentTime > 0, preserve it when the track changes
+    if (currentTime > 0) {
+      console.log('Track changed, preserving currentTime:', currentTime)
+      const preservedTime = currentTime
+      const handleCanPlay = () => {
+        audio.removeEventListener('canplay', handleCanPlay)
+        audio.currentTime = preservedTime
+        console.log('Restored currentTime after track change:', preservedTime)
+      }
+      audio.addEventListener('canplay', handleCanPlay)
+    }
+  }, [currentTrack?.url, currentTime])
 
   // When metadata loads for a new track, autoplay if flagged
   useEffect(() => {
@@ -2125,6 +2152,21 @@ export default function App(): JSX.Element {
                       setIsPlaying(false)
                       setCurrentTime(0)
                       shouldAutoplayRef.current = false
+                    }
+                  }}
+                  onLoadStart={() => {
+                    // Preserve currentTime when src changes
+                    const audio = audioRef.current
+                    if (audio && currentTime > 0) {
+                      console.log('Audio src changing, preserving currentTime:', currentTime)
+                      // Store the current time to restore it after load
+                      const preservedTime = currentTime
+                      const handleCanPlay = () => {
+                        audio.removeEventListener('canplay', handleCanPlay)
+                        audio.currentTime = preservedTime
+                        console.log('Restored currentTime after src change:', preservedTime)
+                      }
+                      audio.addEventListener('canplay', handleCanPlay)
                     }
                   }}
                   className="hidden"
