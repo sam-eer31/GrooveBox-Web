@@ -128,6 +128,7 @@ export default function App(): JSX.Element {
   const uploadCancelRef = useRef<boolean>(false)
   const uploadedPathsRef = useRef<string[]>([])
   const clientIdToNameRef = useRef<Map<string, string>>(new Map())
+  const currentTimeRef = useRef<number>(0)
 
   // Toast helpers bound to state
   const addToast = (message: string, type: Toast['type'] = 'info', duration: number = 3000) => {
@@ -158,6 +159,7 @@ export default function App(): JSX.Element {
   // Keep refs in sync to avoid stale closures in realtime handlers
   useEffect(() => { tracksRef.current = tracks }, [tracks])
   useEffect(() => { currentIndexRef.current = currentIndex }, [currentIndex])
+  useEffect(() => { currentTimeRef.current = currentTime }, [currentTime])
 
   // Theme apply and persist
   useEffect(() => {
@@ -587,24 +589,20 @@ export default function App(): JSX.Element {
   const togglePlay = async () => {
     const audio = audioRef.current
     if (!audio) return
-    
     // Don't broadcast if we're applying a remote change
     if (isApplyingRemoteRef.current) return
-    
-    console.log('togglePlay called:', { 
-      paused: audio.paused, 
-      currentTime: audio.currentTime, 
-      readyState: audio.readyState,
-      src: audio.src 
-    })
-    
+    console.log('togglePlay called:', { paused: audio.paused, currentTime: audio.currentTime, readyState: audio.readyState, src: audio.src })
     if (audio.paused) {
       try {
-        // Don't call audio.load() here - it resets the currentTime!
-        console.log('Starting playback from currentTime:', audio.currentTime)
+        // Force-set resume position to avoid any implicit resets
+        const resumeAt = audio.currentTime > 0 ? audio.currentTime : currentTimeRef.current
+        if (Math.abs(audio.currentTime - resumeAt) > 0.05) {
+          audio.currentTime = resumeAt
+        }
+        console.log('Starting playback from currentTime:', resumeAt)
         await audio.play()
         setIsPlaying(true)
-        broadcastState('play', { index: Math.max(0, currentIndexRef.current), time: audio.currentTime })
+        broadcastState('play', { index: Math.max(0, currentIndexRef.current), time: resumeAt })
       } catch (err) {
         console.warn('Playback error:', err)
         setError('Unable to play the audio. Please try again.')
@@ -613,6 +611,7 @@ export default function App(): JSX.Element {
       console.log('Pausing playback at currentTime:', audio.currentTime)
       audio.pause()
       setIsPlaying(false)
+      setCurrentTime(audio.currentTime)
       broadcastState('pause', { time: audio.currentTime })
     }
   }
@@ -711,6 +710,7 @@ export default function App(): JSX.Element {
   }
 
   const onTimeUpdate: React.ReactEventHandler<HTMLAudioElement> = (e) => {
+    currentTimeRef.current = e.currentTarget.currentTime
     setCurrentTime(e.currentTarget.currentTime)
   }
 
@@ -761,11 +761,10 @@ export default function App(): JSX.Element {
   useEffect(() => {
     const audio = audioRef.current
     if (!audio || !currentTrack) return
-    
     // If we have a currentTime > 0, preserve it when the track changes
-    if (currentTime > 0) {
-      console.log('Track changed, preserving currentTime:', currentTime)
-      const preservedTime = currentTime
+    if (currentTimeRef.current > 0) {
+      const preservedTime = currentTimeRef.current
+      console.log('Track changed, preserving currentTime:', preservedTime)
       const handleCanPlay = () => {
         audio.removeEventListener('canplay', handleCanPlay)
         audio.currentTime = preservedTime
