@@ -10,6 +10,16 @@ type Track = {
   path: string
 }
 
+type UploadProgress = {
+  fileName: string
+  progress: number
+  uploaded: number
+  total: number
+  speed: number
+  status: 'pending' | 'uploading' | 'completed' | 'error'
+  error?: string
+}
+
 const ACCEPTED_TYPES = [
   'audio/mpeg', // mp3
   'audio/mp3',
@@ -45,6 +55,18 @@ function deriveDisplayNameFromObjectName(objectName: string): string {
   return match ? match[1] : decodedName
 }
 
+function formatFileSize(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
+}
+
+function formatSpeed(bytesPerSecond: number): string {
+  return formatFileSize(bytesPerSecond) + '/s'
+}
+
 export default function App(): JSX.Element {
   const [roomCode, setRoomCode] = useState<string>('')
   const [joinCodeInput, setJoinCodeInput] = useState<string>('')
@@ -58,6 +80,9 @@ export default function App(): JSX.Element {
   const [duration, setDuration] = useState(0)
   const [volume, setVolume] = useState(1)
   const [isUploading, setIsUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress[]>([])
+  const [totalUploadSize, setTotalUploadSize] = useState(0)
+  const [totalUploaded, setTotalUploaded] = useState(0)
   const [isLoadingLibrary, setIsLoadingLibrary] = useState(false)
   const [displayName, setDisplayName] = useState<string>('')
   const [createName, setCreateName] = useState<string>('')
@@ -69,6 +94,7 @@ export default function App(): JSX.Element {
   const [playbackBlocked, setPlaybackBlocked] = useState<boolean>(false)
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('groovebox_theme') as 'light' | 'dark') || 'dark')
   const [isUploadOpen, setIsUploadOpen] = useState<boolean>(false)
+  const [isProgressOpen, setIsProgressOpen] = useState<boolean>(false)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -79,6 +105,9 @@ export default function App(): JSX.Element {
   const pendingRemotePlayRef = useRef<{ index: number; time: number } | null>(null)
   const tracksRef = useRef<Track[]>([])
   const currentIndexRef = useRef<number>(-1)
+  const activeXhrsRef = useRef<XMLHttpRequest[]>([])
+  const uploadCancelRef = useRef<boolean>(false)
+  const uploadedPathsRef = useRef<string[]>([])
 
   // Cleanup local object URLs on unmount
   useEffect(() => {
@@ -162,24 +191,148 @@ export default function App(): JSX.Element {
       return
     }
 
+    // Clear any previous errors
+    setError(null)
+
+    // Initialize upload progress and open progress modal
+    const totalSize = accepted.reduce((sum, file) => sum + file.size, 0)
+    const progressItems: UploadProgress[] = accepted.map(file => ({
+      fileName: file.name,
+      progress: 0,
+      uploaded: 0,
+      total: file.size,
+      speed: 0,
+      status: 'pending'
+    }))
+
+    setUploadProgress(progressItems)
+    setTotalUploadSize(totalSize)
+    setTotalUploaded(0)
     setIsUploading(true)
-    setError(unsupported > 0 ? `${unsupported} file(s) were skipped (unsupported type).` : null)
+    setIsUploadOpen(false)
+    setIsProgressOpen(true)
+    setToast(unsupported > 0 ? `${unsupported} file(s) were skipped (unsupported type).` : null)
+
     try {
       const uploadedTracks: Track[] = []
-      for (const file of accepted) {
+      uploadCancelRef.current = false
+      activeXhrsRef.current = []
+      uploadedPathsRef.current = []
+      
+      for (let i = 0; i < accepted.length; i++) {
+        // Check if upload was cancelled
+        if (uploadCancelRef.current) {
+          break
+        }
+
+        const file = accepted[i]
+        const startTime = Date.now()
+        let lastUpdateTime = startTime
+        let lastUploaded = 0
+
+        // Update status to uploading
+        setUploadProgress(prev => prev.map((item, index) => 
+          index === i ? { ...item, status: 'uploading' } : item
+        ))
+
         // Clean the filename by removing brackets and other problematic characters
         const cleanedFileName = cleanFileName(file.name)
         // Encode the cleaned filename to handle special characters safely
         const encodedFileName = encodeURIComponent(cleanedFileName)
         const path = `rooms/${roomCode}/${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}-${encodedFileName}`
-        const { error: upErr } = await supabase.storage.from(bucket).upload(path, file, {
-          contentType: file.type || 'audio/mpeg',
-          upsert: false
-        })
+
+        // Create a custom upload with progress tracking
+        const uploadWithProgress = async (): Promise<{ error?: any }> => {
+          return new Promise((resolve) => {
+            const xhr = new XMLHttpRequest()
+            activeXhrsRef.current.push(xhr)
+            
+            xhr.upload.addEventListener('progress', (e) => {
+              // Check if cancelled during progress
+              if (uploadCancelRef.current) {
+                xhr.abort()
+                return
+              }
+
+              if (e.lengthComputable) {
+                const now = Date.now()
+                const timeDiff = (now - lastUpdateTime) / 1000 // seconds
+                const uploadedDiff = e.loaded - lastUploaded
+                const speed = timeDiff > 0 ? uploadedDiff / timeDiff : 0
+
+                setUploadProgress(prev => prev.map((item, index) => 
+                  index === i ? {
+                    ...item,
+                    progress: (e.loaded / e.total) * 100,
+                    uploaded: e.loaded,
+                    speed
+                  } : item
+                ))
+
+                setTotalUploaded(prev => prev + uploadedDiff)
+                lastUpdateTime = now
+                lastUploaded = e.loaded
+              }
+            })
+
+            xhr.addEventListener('load', () => {
+              if (xhr.status === 200) {
+                resolve({})
+              } else {
+                resolve({ error: new Error(`Upload failed with status ${xhr.status}`) })
+              }
+            })
+
+            xhr.addEventListener('error', () => {
+              resolve({ error: new Error('Upload failed') })
+            })
+
+            xhr.addEventListener('abort', () => {
+              resolve({ error: new Error('Upload cancelled') })
+            })
+
+            // Get upload URL from Supabase
+            supabase.storage.from(bucket).createSignedUploadUrl(path).then(({ data, error }) => {
+              // Check if cancelled before starting upload
+              if (uploadCancelRef.current) {
+                xhr.abort()
+                return
+              }
+
+              if (error || !data?.signedUrl) {
+                resolve({ error: error || new Error('Failed to get upload URL') })
+                return
+              }
+
+              xhr.open('PUT', data.signedUrl)
+              xhr.setRequestHeader('Content-Type', file.type || 'audio/mpeg')
+              xhr.send(file)
+            })
+          })
+        }
+
+        const { error: upErr } = await uploadWithProgress()
+        
+        // Check if cancelled after upload attempt
+        if (uploadCancelRef.current) {
+          break
+        }
+        
         if (upErr) {
-          setError(`Upload failed for ${file.name}: ${upErr.message}`)
+          setUploadProgress(prev => prev.map((item, index) => 
+            index === i ? { ...item, status: 'error', error: upErr.message } : item
+          ))
+          // Don't set error for cancelled uploads
+          if (!upErr.message.includes('cancelled')) {
+            setError(`Upload failed for ${file.name}: ${upErr.message}`)
+          }
           continue
         }
+
+        // Mark as completed
+        setUploadProgress(prev => prev.map((item, index) => 
+          index === i ? { ...item, status: 'completed', progress: 100 } : item
+        ))
 
         // Prefer signed URL so it works even if bucket is private
         // The path already contains the encoded filename, so we don't need to encode again
@@ -207,6 +360,36 @@ export default function App(): JSX.Element {
             path
           })
         }
+        uploadedPathsRef.current.push(path)
+      }
+
+      // Check if upload was cancelled
+      if (uploadCancelRef.current) {
+        // Clean up any uploaded files
+        if (uploadedPathsRef.current.length > 0) {
+          try {
+            const paths = [...uploadedPathsRef.current]
+            uploadedPathsRef.current = []
+            if (supabase) {
+              // Remove in chunks of 100
+              const chunkSize = 100
+              for (let i = 0; i < paths.length; i += chunkSize) {
+                const chunk = paths.slice(i, i + chunkSize)
+                await supabase.storage.from(bucket).remove(chunk)
+              }
+            }
+          } catch (error) {
+            console.error('Failed to clean up uploaded files:', error)
+          }
+        }
+        
+        // Reset UI state
+        setIsUploading(false)
+        setIsProgressOpen(false)
+        setUploadProgress([])
+        setTotalUploadSize(0)
+        setTotalUploaded(0)
+        return
       }
 
       if (uploadedTracks.length > 0) {
@@ -245,8 +428,32 @@ export default function App(): JSX.Element {
           channelRef.current.send({ type: 'broadcast', event: 'playlist:add', payload: { items: payload, sender: clientIdRef.current } })
         }
       }
+
+      // All uploads completed successfully (if not cancelled)
+      if (uploadedTracks.length > 0) {
+        // Show success message briefly
+        setToast(`Successfully uploaded ${uploadedTracks.length} track(s)!`)
+        
+        // Close upload modal after a short delay
+        setTimeout(() => {
+          setIsUploadOpen(false)
+          setIsProgressOpen(false)
+          setUploadProgress([])
+          setTotalUploadSize(0)
+          setTotalUploaded(0)
+        }, 1500)
+      } else {
+        // No successful uploads, close modal immediately
+        setIsUploadOpen(false)
+        setIsProgressOpen(false)
+        setUploadProgress([])
+        setTotalUploadSize(0)
+        setTotalUploaded(0)
+      }
     } finally {
       setIsUploading(false)
+      // Clear active xhrs list
+      activeXhrsRef.current = []
     }
   }
 
@@ -1105,7 +1312,7 @@ export default function App(): JSX.Element {
                 {tracks.length === 0 ? (
                   <p className="text-sm text-black/60 dark:text-white/60">No songs yet. Upload MP3 or WAV files to get started.</p>
                 ) : (
-                  <ul className="divide-y divide-black/10 dark:divide-white/10">
+                  <ul className="divide-y divide-black/10 dark:divide-white/10 max-h-96 overflow-y-auto">
                     {tracks.map((t, idx) => {
                       const active = idx === currentIndex
                       return (
@@ -1163,8 +1370,8 @@ export default function App(): JSX.Element {
         Built with React, Vite, and Tailwind · Plays locally in your browser
       </footer>
 
-      {/* Upload Modal */}
-      {isUploadOpen && (
+      {/* Upload Modal (selection) */}
+      {isUploadOpen && !isUploading && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4"
           role="dialog"
@@ -1173,9 +1380,12 @@ export default function App(): JSX.Element {
           <div className="absolute inset-0 bg-black/60" onClick={() => setIsUploadOpen(false)} />
           <div className="relative w-full max-w-lg card p-6 md:p-7">
             <div className="flex items-center justify-between">
-              <h2 className="text-base font-semibold">Upload Tracks</h2>
-              <button className="icon-btn" onClick={() => setIsUploadOpen(false)} aria-label="Close">✕</button>
+              <h2 className="text-base font-semibold">
+                Upload Tracks
+              </h2>
             </div>
+
+            {/* Upload interface */}
             <div
               onDrop={(e)=>{ onDrop(e); setIsUploadOpen(false) }}
               onDragOver={onDragOver}
@@ -1193,15 +1403,147 @@ export default function App(): JSX.Element {
                 </label>
                 <button className="btn-ghost" onClick={() => setIsUploadOpen(false)}>Cancel</button>
               </div>
-              {isUploading && (
-                <p className="mt-4 text-sm text-black/70 dark:text-white/70">Uploading...</p>
-              )}
               {isLoadingLibrary && (
                 <p className="mt-2 text-sm text-black/60 dark:text-white/60">Loading your library…</p>
               )}
               {error && (
                 <p className="mt-2 text-sm text-red-500">{error}</p>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Upload Progress Modal */}
+      {isProgressOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="absolute inset-0 bg-black/60" />
+          <div className="relative w-full max-w-lg card p-6 md:p-7">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-semibold">Uploading Tracks...</h2>
+            </div>
+
+            <div className="mt-4 space-y-4">
+              {/* Overall progress */}
+              <div className="panel p-4">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-sm font-medium">Overall Progress</span>
+                  <span className="text-sm text-black/60 dark:text-white/60">
+                    {formatFileSize(totalUploaded)} / {formatFileSize(totalUploadSize)}
+                  </span>
+                </div>
+                <div className="w-full bg-black/10 dark:bg-white/10 rounded-full h-2">
+                  <div 
+                    className="bg-brand-500 h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${totalUploadSize > 0 ? (totalUploaded / totalUploadSize) * 100 : 0}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* Individual file progress */}
+              <div className="space-y-3 max-h-64 overflow-y-auto">
+                {uploadProgress.map((item, index) => (
+                  <div key={index} className="panel p-3">
+                    <div className="flex justify-between items-start mb-2">
+                      <span className="text-sm font-medium truncate flex-1 mr-2" title={item.fileName}>
+                        {item.fileName}
+                      </span>
+                      <span className="text-xs text-black/60 dark:text-white/60 whitespace-nowrap">
+                        {item.status === 'completed' ? '100%' : `${Math.round(item.progress)}%`}
+                      </span>
+                    </div>
+                    
+                    <div className="w-full bg-black/10 dark:bg-white/10 rounded-full h-1.5 mb-2">
+                      <div 
+                        className={`h-1.5 rounded-full transition-all duration-300 ${
+                          item.status === 'error' ? 'bg-red-500' : 
+                          item.status === 'completed' ? 'bg-green-500' : 'bg-brand-500'
+                        }`}
+                        style={{ width: `${item.progress}%` }}
+                      />
+                    </div>
+
+                    <div className="flex justify-between items-center text-xs text-black/60 dark:text-white/60">
+                      <span>
+                        {formatFileSize(item.uploaded)} / {formatFileSize(item.total)}
+                      </span>
+                      <span>
+                        {item.status === 'uploading' && item.speed > 0 ? formatSpeed(item.speed) : ''}
+                      </span>
+                    </div>
+
+                    {item.status === 'error' && item.error && (
+                      <p className="text-xs text-red-500 mt-1">{item.error}</p>
+                    )}
+
+                    {item.status === 'completed' && (
+                      <div className="flex items-center text-xs text-green-600 dark:text-green-400 mt-1">
+                        <span className="mr-1">✓</span> Uploaded successfully
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* Status message */}
+              {toast && (
+                <div className="text-center text-sm text-green-600 dark:text-green-400">
+                  {toast}
+                </div>
+              )}
+
+              {/* Cancel button */}
+              <div className="flex justify-end">
+                <button
+                  className="btn-outline border-red-500/60 text-red-500 hover:bg-red-500/10"
+                  onClick={async () => {
+                    // Mark cancellation flag
+                    uploadCancelRef.current = true
+                    
+                    // Abort all active uploads
+                    activeXhrsRef.current.forEach(x => { 
+                      try { 
+                        x.abort() 
+                      } catch (error) {
+                        console.error('Error aborting upload:', error)
+                      } 
+                    })
+                    activeXhrsRef.current = []
+                    
+                    // Remove any successfully uploaded files from server
+                    try {
+                      const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
+                      const paths = [...uploadedPathsRef.current]
+                      uploadedPathsRef.current = []
+                      if (paths.length > 0 && supabase) {
+                        const chunkSize = 100
+                        for (let i = 0; i < paths.length; i += chunkSize) {
+                          const chunk = paths.slice(i, i + chunkSize)
+                          await supabase.storage.from(bucket).remove(chunk)
+                        }
+                      }
+                    } catch (error) {
+                      console.error('Error cleaning up uploaded files:', error)
+                    }
+
+                    // Clear any errors
+                    setError(null)
+                    
+                    // Reset UI state
+                    setIsUploading(false)
+                    setIsProgressOpen(false)
+                    setUploadProgress([])
+                    setTotalUploadSize(0)
+                    setTotalUploaded(0)
+                  }}
+                >
+                  Cancel Uploads
+                </button>
+              </div>
             </div>
           </div>
         </div>
