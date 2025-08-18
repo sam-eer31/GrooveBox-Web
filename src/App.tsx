@@ -587,10 +587,13 @@ export default function App(): JSX.Element {
   const togglePlay = async () => {
     const audio = audioRef.current
     if (!audio) return
+    
+    // Don't broadcast if we're applying a remote change
+    if (isApplyingRemoteRef.current) return
+    
     if (audio.paused) {
       try {
-        // Reset any previous errors
-        audio.load()
+        // Don't call audio.load() here - it resets the currentTime!
         await audio.play()
         setIsPlaying(true)
         broadcastState('play', { index: Math.max(0, currentIndexRef.current), time: audio.currentTime })
@@ -609,8 +612,10 @@ export default function App(): JSX.Element {
     const audio = audioRef.current
     if (!audio) return
     try {
-      // Reset any previous errors
-      audio.load()
+      // Only load if audio is in error state or not ready
+      if (audio.readyState === 0 || audio.error) {
+        audio.load()
+      }
       await audio.play()
       setIsPlaying(true)
     } catch (err) {
@@ -674,6 +679,9 @@ export default function App(): JSX.Element {
   }
 
   const onSeek = (value: number) => {
+    // Don't broadcast if we're applying a remote change
+    if (isApplyingRemoteRef.current) return
+    
     const audio = audioRef.current
     if (!audio) return
     audio.currentTime = value
@@ -1048,33 +1056,41 @@ export default function App(): JSX.Element {
     ch.on('broadcast', { event: 'player:play' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
       const { index, time } = payload as { index: number; time: number }
+      
+      console.log('Received remote play:', { index, time, currentIndex: currentIndexRef.current })
+      
       // If we don't yet have tracks or the index is out of range, queue it
       if (tracksRef.current.length === 0 || index >= tracksRef.current.length) {
         pendingRemotePlayRef.current = { index, time }
         return
       }
+      
       isApplyingRemoteRef.current = true
       shouldAutoplayRef.current = true
+      
       // If index changed, update and wait for metadata; else just play current
       if (currentIndexRef.current !== index) {
+        console.log('Remote play: changing index from', currentIndexRef.current, 'to', index)
         setCurrentIndex(index)
         setCurrentTime(time)
-      } else {
-        const audio = audioRef.current
-        if (audio) {
-          try {
-            audio.currentTime = time
-            void audio.play()
-            setIsPlaying(true)
-          } catch (e) {
-            // Autoplay blocked; defer until user unlocks
-            setPlaybackBlocked(true)
-            pendingRemotePlayRef.current = { index, time }
+        // Wait for state update and metadata load
+        setTimeout(() => {
+          const audio = audioRef.current
+          if (audio && audio.readyState >= 2) { // HAVE_CURRENT_DATA or higher
+            try {
+              audio.currentTime = time
+              void audio.play()
+              setIsPlaying(true)
+            } catch (e) {
+              console.log('Remote play failed:', e)
+              setPlaybackBlocked(true)
+              pendingRemotePlayRef.current = { index, time }
+            }
           }
-        }
-      }
-      // Try to play immediately; if metadata not ready, loadedmetadata handler will also trigger play
-      setTimeout(() => {
+          isApplyingRemoteRef.current = false
+        }, 100) // Give more time for state update
+      } else {
+        // Same track, just resume from time
         const audio = audioRef.current
         if (audio) {
           try {
@@ -1082,16 +1098,20 @@ export default function App(): JSX.Element {
             void audio.play()
             setIsPlaying(true)
           } catch (e) {
+            console.log('Remote play failed:', e)
             setPlaybackBlocked(true)
             pendingRemotePlayRef.current = { index, time }
           }
         }
         isApplyingRemoteRef.current = false
-      }, 0)
+      }
     })
 
     ch.on('broadcast', { event: 'player:pause' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
+      
+      console.log('Received remote pause:', payload)
+      
       isApplyingRemoteRef.current = true
       const { time } = payload as { time: number }
       const audio = audioRef.current
@@ -1101,6 +1121,7 @@ export default function App(): JSX.Element {
       }
       setIsPlaying(false)
       shouldAutoplayRef.current = false
+      setCurrentTime(time)
       setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
     })
 
@@ -1114,19 +1135,31 @@ export default function App(): JSX.Element {
       setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
     })
 
-    ch.on('broadcast', { event: 'player:next' }, () => {
+    ch.on('broadcast', { event: 'player:next' }, ({ payload }) => {
+      if (!payload || payload.sender === clientIdRef.current) return
+      
+      console.log('Received remote next')
+      
       isApplyingRemoteRef.current = true
       const nextIndex = Math.min(tracksRef.current.length - 1, Math.max(0, currentIndexRef.current + 1))
-      pendingRemotePlayRef.current = { index: nextIndex, time: 0 }
-      goNext()
+      console.log('Remote next: changing from', currentIndexRef.current, 'to', nextIndex)
+      setCurrentIndex(nextIndex)
+      setCurrentTime(0)
+      shouldAutoplayRef.current = true
       setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
     })
 
-    ch.on('broadcast', { event: 'player:previous' }, () => {
+    ch.on('broadcast', { event: 'player:previous' }, ({ payload }) => {
+      if (!payload || payload.sender === clientIdRef.current) return
+      
+      console.log('Received remote previous')
+      
       isApplyingRemoteRef.current = true
       const prevIndex = Math.max(0, Math.min(tracksRef.current.length - 1, currentIndexRef.current - 1))
-      pendingRemotePlayRef.current = { index: prevIndex, time: 0 }
-      goPrevious()
+      console.log('Remote previous: changing from', currentIndexRef.current, 'to', prevIndex)
+      setCurrentIndex(prevIndex)
+      setCurrentTime(0)
+      shouldAutoplayRef.current = true
       setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
     })
 
@@ -1155,20 +1188,26 @@ export default function App(): JSX.Element {
       if (!isHost) return
       
       // Send current player state to the requesting user
-      const currentTrack = tracksRef.current[currentIndexRef.current]
-      if (currentTrack) {
-                 ch.send({
-           type: 'broadcast',
-           event: 'player:state_response',
-           payload: {
-             index: currentIndexRef.current,
-             time: currentTime,
-             isPlaying: isPlaying,
-             sender: clientIdRef.current,
-             target: payload.sender
-           }
-         })
-      }
+      const audio = audioRef.current
+      const currentTime = audio ? audio.currentTime : 0
+      
+      console.log('Host responding with state:', { 
+        index: currentIndexRef.current, 
+        time: currentTime, 
+        isPlaying: isPlaying 
+      })
+      
+      ch.send({
+        type: 'broadcast',
+        event: 'player:state_response',
+        payload: {
+          index: currentIndexRef.current,
+          time: currentTime,
+          isPlaying: isPlaying,
+          sender: clientIdRef.current,
+          target: payload.sender
+        }
+      })
     })
 
     // Handle state responses for reconnecting users
@@ -1183,21 +1222,37 @@ export default function App(): JSX.Element {
         target: string;
       }
       
+      console.log('Syncing with host state:', { index, time, remoteIsPlaying, currentIndex: currentIndexRef.current })
+      
       // Update local state to match host
       if (index >= 0 && index < tracksRef.current.length) {
-        setCurrentIndex(index)
-        setCurrentTime(time)
+        isApplyingRemoteRef.current = true
+        
+        if (index !== currentIndexRef.current) {
+          console.log('State sync: changing index from', currentIndexRef.current, 'to', index)
+          setCurrentIndex(index)
+          setCurrentTime(time)
+          shouldAutoplayRef.current = remoteIsPlaying
+        } else {
+          console.log('State sync: updating time to', time, 'and playing state to', remoteIsPlaying)
+          setCurrentTime(time)
+          const audio = audioRef.current
+          if (audio) {
+            audio.currentTime = time
+          }
+        }
         
         if (remoteIsPlaying && !isPlaying) {
           // Host is playing, so we should play too
           shouldAutoplayRef.current = true
           const audio = audioRef.current
-          if (audio) {
+          if (audio && audio.readyState >= 2) { // HAVE_CURRENT_DATA or higher
             try {
               audio.currentTime = time
               void audio.play()
               setIsPlaying(true)
             } catch (e) {
+              console.log('State sync play failed:', e)
               setPlaybackBlocked(true)
             }
           }
@@ -1210,6 +1265,7 @@ export default function App(): JSX.Element {
           setIsPlaying(false)
         }
         
+        setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
         addToast('Synced with host player state', 'info')
       }
     })
