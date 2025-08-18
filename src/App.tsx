@@ -20,6 +20,13 @@ type UploadProgress = {
   error?: string
 }
 
+type Toast = {
+  id: string
+  message: string
+  type: 'success' | 'info' | 'warning' | 'error'
+  duration?: number
+}
+
 const ACCEPTED_TYPES = [
   'audio/mpeg', // mp3
   'audio/mp3',
@@ -67,6 +74,17 @@ function formatSpeed(bytesPerSecond: number): string {
   return formatFileSize(bytesPerSecond) + '/s'
 }
 
+function useToasts() {
+  const addToast = (message: string, type: Toast['type'] = 'info', duration: number = 3000) => {
+    const id = crypto.randomUUID?.() || Math.random().toString(36).slice(2)
+    const toast: Toast = { id, message, type, duration }
+    // setToasts is captured from outer scope via closure when used inside component
+    // This function will be rebound below in component with proper setToasts reference
+    return toast
+  }
+  return { addToast }
+}
+
 export default function App(): JSX.Element {
   const [roomCode, setRoomCode] = useState<string>('')
   const [joinCodeInput, setJoinCodeInput] = useState<string>('')
@@ -90,7 +108,7 @@ export default function App(): JSX.Element {
   const [roomTitle, setRoomTitle] = useState<string>('')
   const [roomTitleInput, setRoomTitleInput] = useState<string>('')
   const [participants, setParticipants] = useState<Array<{ key: string; name: string }>>([])
-  const [toast, setToast] = useState<string | null>(null)
+  const [toasts, setToasts] = useState<Toast[]>([])
   const [playbackBlocked, setPlaybackBlocked] = useState<boolean>(false)
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('groovebox_theme') as 'light' | 'dark') || 'dark')
   const [isUploadOpen, setIsUploadOpen] = useState<boolean>(false)
@@ -109,6 +127,17 @@ export default function App(): JSX.Element {
   const activeXhrsRef = useRef<XMLHttpRequest[]>([])
   const uploadCancelRef = useRef<boolean>(false)
   const uploadedPathsRef = useRef<string[]>([])
+  const clientIdToNameRef = useRef<Map<string, string>>(new Map())
+
+  // Toast helpers bound to state
+  const addToast = (message: string, type: Toast['type'] = 'info', duration: number = 3000) => {
+    const id = crypto.randomUUID?.() || Math.random().toString(36).slice(2)
+    const toast: Toast = { id, message, type, duration }
+    setToasts(prev => [...prev, toast])
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id))
+    }, duration)
+  }
 
   // Cleanup local object URLs on unmount
   useEffect(() => {
@@ -212,7 +241,7 @@ export default function App(): JSX.Element {
     setIsUploading(true)
     setIsUploadOpen(false)
     setIsProgressOpen(true)
-    setToast(unsupported > 0 ? `${unsupported} file(s) were skipped (unsupported type).` : null)
+    if (unsupported > 0) addToast(`${unsupported} file(s) were skipped (unsupported type).`, 'warning')
 
     try {
       const uploadedTracks: Track[] = []
@@ -343,6 +372,7 @@ export default function App(): JSX.Element {
           const { data: pub } = supabase.storage.from(bucket).getPublicUrl(path)
           if (!pub?.publicUrl) {
             setError(`Could not generate URL for ${file.name}`)
+            addToast(`Could not generate URL for ${file.name}`, 'error')
             continue
           }
           uploadedTracks.push({
@@ -432,8 +462,8 @@ export default function App(): JSX.Element {
 
       // All uploads completed successfully (if not cancelled)
       if (uploadedTracks.length > 0) {
-        // Show success message briefly
-        setToast(`Successfully uploaded ${uploadedTracks.length} track(s)!`)
+        // Show success message
+        addToast(`Successfully uploaded ${uploadedTracks.length} track(s)!`, 'success')
         
         // Close upload modal after a short delay
         setTimeout(() => {
@@ -895,17 +925,23 @@ export default function App(): JSX.Element {
       const entries: Array<{ key: string; name: string }> = []
       Object.entries(state).forEach(([key, metas]) => {
         if (key === clientIdRef.current) return // exclude self from others list
-        metas.forEach(meta => entries.push({ key, name: meta?.name || 'Guest' }))
+        metas.forEach(meta => {
+          const name = meta?.name || 'Guest'
+          clientIdToNameRef.current.set(key, name)
+          entries.push({ key, name })
+        })
       })
       setParticipants(entries)
     })
-    ch.on('presence', { event: 'join' }, ({ key }) => {
-      setToast('Someone joined the room')
-      setTimeout(()=>setToast(null), 2500)
+    ch.on('presence', { event: 'join' }, ({ key, newPresences }) => {
+      const name = newPresences?.[0]?.name || clientIdToNameRef.current.get(key) || 'Guest'
+      clientIdToNameRef.current.set(key, name)
+      addToast(`${name} joined the room`, 'success')
     })
-    ch.on('presence', { event: 'leave' }, ({ key }) => {
-      setToast('Someone left the room')
-      setTimeout(()=>setToast(null), 2500)
+    ch.on('presence', { event: 'leave' }, ({ key, leftPresences }) => {
+      const name = leftPresences?.[0]?.name || clientIdToNameRef.current.get(key) || 'Guest'
+      addToast(`${name} left the room`, 'info')
+      clientIdToNameRef.current.delete(key)
     })
 
     ch.on('broadcast', { event: 'playlist:add' }, async ({ payload }) => {
@@ -925,6 +961,7 @@ export default function App(): JSX.Element {
       }
       if (added.length > 0) {
         setTracks(prev => [...prev, ...added])
+        addToast(`${added.length} track(s) added`, 'success')
       }
     })
 
@@ -1255,7 +1292,7 @@ export default function App(): JSX.Element {
               ))}
             </div>
           )}
-          {toast && <div className="mb-3 text-xs text-black/70 dark:text-white/70">{toast}</div>}
+          {/* Legacy single-toast placeholder removed; using stacked toasts now */}
           {error && inRoom && <div className="hidden"></div>}
 
           <div className="grid lg:grid-cols-3 gap-4 sm:gap-6">
@@ -1435,6 +1472,27 @@ export default function App(): JSX.Element {
         Built with React, Vite, and Tailwind · Plays locally in your browser
       </footer>
 
+      {/* Toasts */}
+      {toasts.length > 0 && (
+        <div className="fixed bottom-4 right-4 z-[60] space-y-2 w-72">
+          {toasts.map(t => (
+            <div
+              key={t.id}
+              className={`rounded-md px-3 py-2 text-sm shadow-soft border 
+                ${t.type === 'success' ? 'bg-green-600/10 border-green-600/30 text-green-200' : ''}
+                ${t.type === 'info' ? 'bg-blue-600/10 border-blue-600/30 text-blue-200' : ''}
+                ${t.type === 'warning' ? 'bg-yellow-600/10 border-yellow-600/30 text-yellow-200' : ''}
+                ${t.type === 'error' ? 'bg-red-600/10 border-red-600/30 text-red-200' : ''}
+              `}
+              role="status"
+              aria-live="polite"
+            >
+              {t.message}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Upload Modal (selection) */}
       {isUploadOpen && !isUploading && (
         <div
@@ -1554,12 +1612,7 @@ export default function App(): JSX.Element {
                 ))}
               </div>
 
-              {/* Status message */}
-              {toast && (
-                <div className="text-center text-sm text-green-600 dark:text-green-400">
-                  {toast}
-                </div>
-              )}
+              {/* Status message handled by toasts */}
 
               {/* Cancel button */}
               <div className="flex justify-end">
