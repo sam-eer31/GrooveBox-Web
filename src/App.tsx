@@ -613,8 +613,9 @@ export default function App(): JSX.Element {
     if (!audio) return
     try {
       // Only load if audio is in error state or not ready
-      if (audio.readyState === 0 || audio.error) {
-        console.log('Audio not ready, loading...')
+      // Don't load if we have a currentTime set (means we're resuming)
+      if ((audio.readyState === 0 || audio.error) && audio.currentTime === 0) {
+        console.log('Audio not ready and no currentTime, loading...')
         audio.load()
         // Wait for load to complete
         await new Promise((resolve) => {
@@ -624,6 +625,8 @@ export default function App(): JSX.Element {
           }
           audio.addEventListener('canplay', handleCanPlay)
         })
+      } else if (audio.readyState === 0 && audio.currentTime > 0) {
+        console.log('Audio paused but has currentTime, not loading to preserve position')
       }
       await audio.play()
       setIsPlaying(true)
@@ -669,7 +672,15 @@ export default function App(): JSX.Element {
     if (shouldAutoplayRef.current) {
       shouldAutoplayRef.current = false
       console.log('Metadata loaded: starting autoplay')
-      void playCurrent()
+      // Don't call playCurrent here as it might reset position
+      // Instead, just play directly
+      try {
+        void el.play()
+        setIsPlaying(true)
+      } catch (e) {
+        console.log('Metadata loaded: direct play failed:', e)
+        setPlaybackBlocked(true)
+      }
     }
     
     // Apply any pending remote play now that metadata is ready
@@ -1573,8 +1584,12 @@ export default function App(): JSX.Element {
       // Resume audio context if suspended (mobile backgrounding)
       const resumeAudioContext = async () => {
         try {
-          if (audio.readyState === 0) { // HAVE_NOTHING
+          // Only load if we don't have a currentTime set (preserve position)
+          if (audio.readyState === 0 && audio.currentTime === 0) { // HAVE_NOTHING
+            console.log('Resuming audio context, loading...')
             await audio.load()
+          } else if (audio.readyState === 0 && audio.currentTime > 0) {
+            console.log('Audio paused with currentTime, not loading to preserve position')
           }
         } catch (error) {
           console.log('Audio context resume failed:', error)
