@@ -41,6 +41,8 @@ export default function App(): JSX.Element {
   const [displayName, setDisplayName] = useState<string>('')
   const [roomTitle, setRoomTitle] = useState<string>('')
   const [roomTitleInput, setRoomTitleInput] = useState<string>('')
+  const [participants, setParticipants] = useState<Array<{ key: string; name: string }>>([])
+  const [toast, setToast] = useState<string | null>(null)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -158,7 +160,7 @@ export default function App(): JSX.Element {
     }
   }
 
-  // Load existing songs for the current room
+  // Load existing songs and room meta for the current room
   useEffect(() => {
     const loadFromSupabase = async () => {
       if (!supabase || !inRoom || !roomCode) return
@@ -166,6 +168,15 @@ export default function App(): JSX.Element {
       setIsLoadingLibrary(true)
       try {
         const prefix = `rooms/${roomCode}`
+        // Load room meta
+        try {
+          const { data: metaFile } = await supabase.storage.from(bucket).download(`${prefix}/meta.json`)
+          if (metaFile) {
+            const text = await metaFile.text()
+            const meta = JSON.parse(text) as { roomName?: string, hostName?: string }
+            setRoomTitle(meta.roomName || '')
+          }
+        } catch {}
         const { data: files, error: listErr } = await supabase.storage.from(bucket).list(prefix, {
           limit: 100,
           sortBy: { column: 'name', order: 'asc' }
@@ -325,6 +336,15 @@ export default function App(): JSX.Element {
     cleanupRoomState()
   }
 
+  const leaveRoom = async () => {
+    try { localStorage.removeItem('groovebox_room') } catch {}
+    if (channelRef.current) {
+      channelRef.current.unsubscribe()
+      channelRef.current = null
+    }
+    cleanupRoomState()
+  }
+
   useEffect(() => {
     const handler = () => {
       if (isHost) void endRoom()
@@ -348,6 +368,10 @@ export default function App(): JSX.Element {
     setIsHost(true)
     setInRoom(true)
     try {
+      localStorage.setItem('groovebox_room', code)
+      localStorage.setItem('groovebox_name', displayName.trim())
+    } catch {}
+    try {
       const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
       const meta = { roomName: roomTitleInput.trim(), hostName: displayName.trim(), createdAt: new Date().toISOString() }
       const metaBlob = new Blob([JSON.stringify(meta)], { type: 'application/json' })
@@ -364,14 +388,41 @@ export default function App(): JSX.Element {
     setRoomCode(code)
     setIsHost(false)
     setInRoom(true)
+    try {
+      localStorage.setItem('groovebox_room', code)
+      localStorage.setItem('groovebox_name', displayName.trim())
+    } catch {}
   }
 
-  // Realtime: subscribe to room events (must be before any early return)
+  // Realtime: subscribe to room events (presence, playlist, player)
   useEffect(() => {
     if (!inRoom || !roomCode || !supabase) return
     if (!clientIdRef.current) clientIdRef.current = crypto.randomUUID?.() || Math.random().toString(36).slice(2)
 
-    const ch = supabase.channel(`room-${roomCode}`, { config: { broadcast: { self: false } } })
+    const ch = supabase.channel(`room-${roomCode}`, {
+      config: {
+        broadcast: { self: false },
+        presence: { key: clientIdRef.current }
+      }
+    })
+
+    // Presence: track participants
+    ch.on('presence', { event: 'sync' }, () => {
+      const state = ch.presenceState() as Record<string, Array<{ name?: string }>>
+      const entries: Array<{ key: string; name: string }> = []
+      Object.entries(state).forEach(([key, metas]) => {
+        metas.forEach(() => entries.push({ key, name: '' }))
+      })
+      setParticipants(entries)
+    })
+    ch.on('presence', { event: 'join' }, ({ key }) => {
+      setToast('Someone joined the room')
+      setTimeout(()=>setToast(null), 2500)
+    })
+    ch.on('presence', { event: 'leave' }, ({ key }) => {
+      setToast('Someone left the room')
+      setTimeout(()=>setToast(null), 2500)
+    })
 
     ch.on('broadcast', { event: 'playlist:add' }, async ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
@@ -448,7 +499,12 @@ export default function App(): JSX.Element {
       cleanupRoomState()
     })
 
-    ch.subscribe()
+    ch.subscribe(async (status) => {
+      if (status === 'SUBSCRIBED') {
+        // Track self presence with name
+        await ch.track({ name: displayName || 'Guest' })
+      }
+    })
     channelRef.current = ch
 
     return () => {
@@ -456,6 +512,20 @@ export default function App(): JSX.Element {
       channelRef.current = null
     }
   }, [inRoom, roomCode])
+
+  // Restore session on first render
+  useEffect(() => {
+    try {
+      const savedRoom = localStorage.getItem('groovebox_room') || ''
+      const savedName = localStorage.getItem('groovebox_name') || ''
+      if (savedName) setDisplayName(savedName)
+      if (savedRoom) {
+        setRoomCode(savedRoom)
+        setInRoom(true)
+        setIsHost(false)
+      }
+    } catch {}
+  }, [])
 
   // Render based on state; hooks above are unconditional to preserve order
   if (!inRoom) {
@@ -472,20 +542,30 @@ export default function App(): JSX.Element {
           </div>
         </header>
         <main className="flex-1">
-          <div className="max-w-md mx-auto px-6 md:px-8">
+          <div className="max-w-3xl mx-auto px-6 md:px-8 grid md:grid-cols-2 gap-6">
             <div className="bg-slate-800/60 rounded-xl p-6 ring-1 ring-white/5">
-              <h2 className="font-semibold">Listen together</h2>
-              <p className="mt-1 text-sm text-slate-400">Create a room or join with a code.</p>
-              <div className="mt-6 grid gap-4">
-                <div className="grid gap-2">
+              <h2 className="font-semibold">Create a Room</h2>
+              <p className="mt-1 text-sm text-slate-400">Host a synced listening session.</p>
+              <div className="mt-4 grid gap-3">
+                <div className="grid gap-1.5">
                   <label className="text-xs text-slate-400">Your Name</label>
                   <input value={displayName} onChange={(e)=>setDisplayName(e.currentTarget.value)} placeholder="e.g. Alex" className="rounded-md bg-slate-900 border border-slate-700 px-3 py-2 outline-none focus:border-brand-500/60" />
                 </div>
-                <div className="grid gap-2">
-                  <label className="text-xs text-slate-400">Room Name (optional for host)</label>
+                <div className="grid gap-1.5">
+                  <label className="text-xs text-slate-400">Room Name (optional)</label>
                   <input value={roomTitleInput} onChange={(e)=>setRoomTitleInput(e.currentTarget.value)} placeholder="e.g. Friday Jam" className="rounded-md bg-slate-900 border border-slate-700 px-3 py-2 outline-none focus:border-brand-500/60" />
                 </div>
-                <button onClick={createRoom} className="rounded-md bg-brand-500 text-slate-900 font-medium px-4 py-2">Create Room</button>
+                <button onClick={createRoom} className="mt-2 rounded-md bg-brand-500 text-slate-900 font-medium px-4 py-2">Create Room</button>
+              </div>
+            </div>
+            <div className="bg-slate-800/60 rounded-xl p-6 ring-1 ring-white/5">
+              <h2 className="font-semibold">Join a Room</h2>
+              <p className="mt-1 text-sm text-slate-400">Enter a room code to join.</p>
+              <div className="mt-4 grid gap-3">
+                <div className="grid gap-1.5">
+                  <label className="text-xs text-slate-400">Your Name</label>
+                  <input value={displayName} onChange={(e)=>setDisplayName(e.currentTarget.value)} placeholder="e.g. Alex" className="rounded-md bg-slate-900 border border-slate-700 px-3 py-2 outline-none focus:border-brand-500/60" />
+                </div>
                 <div className="flex gap-2">
                   <input value={joinCodeInput} onChange={(e)=>setJoinCodeInput(e.currentTarget.value)} placeholder="Enter room code" className="flex-1 rounded-md bg-slate-900 border border-slate-700 px-3 py-2 outline-none focus:border-brand-500/60" />
                   <button onClick={joinRoom} className="rounded-md border border-slate-700 px-4 py-2 hover:border-brand-500/60">Join</button>
@@ -529,14 +609,23 @@ export default function App(): JSX.Element {
             className="hidden"
             onChange={(e) => onFiles(e.currentTarget.files)}
           />
-          {isHost && (
-            <button onClick={endRoom} className="ml-3 rounded-md border border-red-500/60 text-red-300 px-4 py-2 hover:bg-red-500/10">End Room</button>
-          )}
+          <div className="ml-3 flex items-center gap-2">
+            {isHost ? (
+              <button onClick={endRoom} className="rounded-md border border-red-500/60 text-red-300 px-3 py-2 hover:bg-red-500/10">End Room</button>
+            ) : (
+              <button onClick={leaveRoom} className="rounded-md border border-slate-700 px-3 py-2 hover:border-brand-500/60">Leave</button>
+            )}
+          </div>
         </div>
       </header>
 
       <main className="flex-1">
         <div className="max-w-3xl mx-auto px-6 md:px-8">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-slate-400">You: <span className="font-medium text-slate-200">{displayName || 'Guest'}</span></div>
+            <div className="text-sm text-slate-400">Participants: <span className="font-medium text-slate-200">{participants.length + 1}</span></div>
+          </div>
+          {toast && <div className="mt-2 text-xs text-slate-300">{toast}</div>}
           <div
             onDrop={onDrop}
             onDragOver={onDragOver}
