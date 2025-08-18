@@ -842,8 +842,8 @@ export default function App(): JSX.Element {
         <header className="border-b border-black/10 dark:border-white/10">
           <div className="container-pro flex h-16 items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="h-8 w-8 rounded-md bg-brand-500/20 ring-1 ring-brand-500/40 grid place-items-center">
-                <Music className="h-4 w-4 text-brand-500" />
+              <div className="grid place-items-center">
+                <img src="/favicon/favicon.svg" alt="GrooveBox" className="h-6 w-6 sm:h-7 sm:w-7" />
               </div>
               <h1 className="text-base md:text-lg font-semibold tracking-tight">GrooveBox</h1>
             </div>
@@ -908,9 +908,7 @@ export default function App(): JSX.Element {
       <header className="border-b border-black/10 dark:border-white/10">
         <div className="container-pro flex h-14 sm:h-16 items-center gap-2 sm:gap-3">
           <div className="flex items-center gap-3 flex-1">
-            <div className="h-7 w-7 sm:h-8 sm:w-8 rounded-md bg-brand-500/20 ring-1 ring-brand-500/40 grid place-items-center">
-              <Music className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-brand-500" />
-            </div>
+            <img src="/favicon/favicon.svg" alt="GrooveBox" className="h-5 w-5 sm:h-6 sm:w-6" />
             <div className="min-w-0">
               <h1 className="text-sm sm:text-base md:text-lg font-semibold tracking-tight">GrooveBox</h1>
               <p className="text-[10px] sm:text-[11px] text-black/60 dark:text-white/60 truncate">
