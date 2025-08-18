@@ -172,6 +172,22 @@ export default function App(): JSX.Element {
       }
 
       if (uploadedTracks.length > 0) {
+        // Persist track metadata (display names) to tracks.json
+        try {
+          const metaPath = `rooms/${roomCode}/tracks.json`
+          const { data: existing } = await supabase.storage.from(bucket).download(metaPath)
+          let trackMeta: Array<{ path: string; name: string }> = []
+          if (existing) {
+            try { trackMeta = JSON.parse(await existing.text()) as Array<{ path: string; name: string }> } catch {}
+          }
+          const toAppend = uploadedTracks.map(t => ({ path: t.path, name: t.name }))
+          // Merge unique by path
+          const seen = new Set(trackMeta.map(i => i.path))
+          for (const it of toAppend) { if (!seen.has(it.path)) trackMeta.push(it) }
+          const blob = new Blob([JSON.stringify(trackMeta, null, 2)], { type: 'application/json' })
+          await supabase.storage.from(bucket).upload(metaPath, blob, { upsert: true, cacheControl: 'no-cache' })
+        } catch {}
+
         setTracks(prev => {
           const next = [...prev, ...uploadedTracks]
           if (prev.length === 0) {
@@ -210,6 +226,16 @@ export default function App(): JSX.Element {
             setRoomTitle(meta.roomName || '')
           }
         } catch {}
+        // Load track display names if present
+        let nameByPath = new Map<string, string>()
+        try {
+          const { data: tracksFile } = await supabase.storage.from(bucket).download(`${prefix}/tracks.json`)
+          if (tracksFile) {
+            const text = await tracksFile.text()
+            const list = JSON.parse(text) as Array<{ path: string; name: string }>
+            list.forEach(it => nameByPath.set(it.path, it.name))
+          }
+        } catch {}
         const { data: files, error: listErr } = await supabase.storage.from(bucket).list(prefix, {
           limit: 100,
           sortBy: { column: 'name', order: 'asc' }
@@ -224,11 +250,13 @@ export default function App(): JSX.Element {
         const loaded: Track[] = []
         for (const f of files) {
           if (f.name === 'meta.json') continue
+          if (f.name === 'tracks.json') continue
           const path = `${prefix}/${f.name}`
           const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
           const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl
           if (!url) continue
-          loaded.push({ id: path, url, name: f.name, path })
+          const displayName = nameByPath.get(path) || f.name
+          loaded.push({ id: path, url, name: displayName, path })
         }
 
         setTracks(loaded)
@@ -924,107 +952,45 @@ export default function App(): JSX.Element {
             )}
           </div>
 
-          {/* Playlist */}
+          {/* Player (card) */}
           <div className="mt-8">
-            <div className="bg-slate-800/40 rounded-xl p-5 ring-1 ring-white/5">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm uppercase tracking-wide text-slate-400">Playlist</h3>
-                <span className="text-xs text-slate-500">{tracks.length} {tracks.length === 1 ? 'track' : 'tracks'}</span>
-              </div>
-              {tracks.length === 0 ? (
-                <p className="text-slate-400 text-sm">No songs yet. Upload MP3 or WAV files to get started.</p>
-              ) : (
-                <ul className="divide-y divide-slate-700/40">
-                  {tracks.map((t, idx) => {
-                    const active = idx === currentIndex
-                    return (
-                      <li key={t.id}>
-                        <button
-                          className={`w-full text-left px-3 py-2 rounded-md hover:bg-slate-700/30 transition ${active ? 'bg-slate-700/30 text-brand-500' : ''}`}
-                          onClick={() => {
-                            setCurrentIndex(idx)
-                            setCurrentTime(0)
-                            shouldAutoplayRef.current = true
-                            // Try immediate local play; broadcast for others regardless
-                            const audio = audioRef.current
-                            if (audio) {
-                              try { audio.currentTime = 0; void audio.play(); setIsPlaying(true) } catch { setPlaybackBlocked(true) }
-                            }
-                            if (channelRef.current) {
-                              channelRef.current.send({ type: 'broadcast', event: 'player:select', payload: { index: idx, sender: clientIdRef.current } })
-                              channelRef.current.send({ type: 'broadcast', event: 'player:play', payload: { index: idx, time: 0, sender: clientIdRef.current } })
-                            }
-                          }}
-                        >
-                          <div className="flex items-center gap-3">
-                            <span className="text-xs w-6 text-slate-400">{idx + 1}</span>
-                            <span className="truncate" title={t.name}>{t.name}</span>
-                            {active && isPlaying && <span aria-hidden className="ml-auto text-xs">▶</span>}
-                          </div>
-                        </button>
-                      </li>
-                    )
-                  })}
-                </ul>
-              )}
-            </div>
-          </div>
-
-          {/* Player */}
-          <div className="mt-8">
-            <div className="bg-slate-800/60 rounded-xl p-5 md:p-6 ring-1 ring-white/5">
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                <div className="truncate">
-                  <p className="text-sm uppercase tracking-wide text-slate-400">Now Playing</p>
-                  <h2 className="mt-1 font-medium truncate" title={fileName}>{fileName}</h2>
+            <div className="rounded-2xl p-6 md:p-8 shadow-lg ring-1 ring-black/10 dark:ring-white/10 bg-white/80 dark:bg-slate-900/70 backdrop-blur">
+              <div className="flex items-center gap-5">
+                <div className="h-16 w-16 md:h-20 md:w-20 rounded-lg bg-gradient-to-br from-brand-500/30 to-slate-500/30 grid place-items-center ring-1 ring-white/10">
+                  <Music className="h-7 w-7 text-brand-500" />
                 </div>
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={goPrevious}
-                    disabled={!hasPrevious}
-                    className="h-10 w-10 rounded-full bg-slate-700 text-slate-200 grid place-items-center disabled:opacity-40"
-                    aria-label="Previous"
-                  >
-                    <SkipBack className="h-4 w-4" />
-                  </button>
-                  <button
-                    onClick={togglePlay}
-                    disabled={!currentTrack}
-                    className="h-10 w-10 rounded-full bg-brand-500 text-slate-900 grid place-items-center disabled:opacity-50"
-                    aria-label={isPlaying ? 'Pause' : 'Play'}
-                  >
-                    {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
-                  </button>
-                  <button
-                    onClick={goNext}
-                    disabled={!hasNext}
-                    className="h-10 w-10 rounded-full bg-slate-700 text-slate-200 grid place-items-center disabled:opacity-40"
-                    aria-label="Next"
-                  >
-                    <SkipForward className="h-4 w-4" />
-                  </button>
-                </div>
-              </div>
-
-              <div className="mt-4 grid grid-cols-1 md:grid-cols-5 gap-4 items-center">
-                <div className="md:col-span-4">
-                  <input
-                    type="range"
-                    min={0}
-                    max={duration || 0}
-                    step={0.1}
-                    value={currentTime}
-                    onChange={(e) => onSeek(Number(e.currentTarget.value))}
-                    className="w-full accent-brand-500"
-                    disabled={!currentTrack}
-                  />
-                  <div className="mt-1 flex justify-between text-xs text-slate-400">
-                    <span>{formatTime(currentTime)}</span>
-                    <span>{formatTime(duration)}</span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">Now Playing</p>
+                  <h2 className="mt-1 text-lg md:text-xl font-semibold truncate" title={fileName}>{fileName}</h2>
+                  <div className="mt-3 flex items-center justify-center gap-3">
+                    <button
+                      onClick={goPrevious}
+                      disabled={!hasPrevious}
+                      className="h-10 w-10 rounded-full bg-slate-200 text-slate-800 grid place-items-center hover:bg-slate-300 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600 disabled:opacity-40"
+                      aria-label="Previous"
+                    >
+                      <SkipBack className="h-4 w-4" />
+                    </button>
+                    <button
+                      onClick={togglePlay}
+                      disabled={!currentTrack}
+                      className="h-12 w-12 rounded-full bg-brand-500 text-slate-900 grid place-items-center hover:brightness-110 disabled:opacity-50"
+                      aria-label={isPlaying ? 'Pause' : 'Play'}
+                    >
+                      {isPlaying ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6" />}
+                    </button>
+                    <button
+                      onClick={goNext}
+                      disabled={!hasNext}
+                      className="h-10 w-10 rounded-full bg-slate-200 text-slate-800 grid place-items-center hover:bg-slate-300 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600 disabled:opacity-40"
+                      aria-label="Next"
+                    >
+                      <SkipForward className="h-4 w-4" />
+                    </button>
                   </div>
                 </div>
-                <div className="md:col-span-1 flex items-center gap-2">
-                  <span className="text-xs text-slate-400">Vol</span>
+                <div className="hidden md:flex items-center gap-2 w-40">
+                  <Volume2 className="h-4 w-4 text-slate-500" />
                   <input
                     type="range"
                     min={0}
@@ -1033,6 +999,35 @@ export default function App(): JSX.Element {
                     value={volume}
                     onChange={(e) => setVolume(Number(e.currentTarget.value))}
                     className="w-full accent-brand-500"
+                  />
+                </div>
+              </div>
+              <div className="mt-4">
+                <input
+                  type="range"
+                  min={0}
+                  max={duration || 0}
+                  step={0.1}
+                  value={currentTime}
+                  onChange={(e) => onSeek(Number(e.currentTarget.value))}
+                  className="w-full accent-brand-500"
+                  disabled={!currentTrack}
+                />
+                <div className="mt-1 flex justify-between text-xs text-slate-500">
+                  <span>{formatTime(currentTime)}</span>
+                  <span>{formatTime(duration)}</span>
+                </div>
+                {/* Mobile volume control */}
+                <div className="mt-3 flex items-center gap-2 md:hidden">
+                  <Volume2 className="h-4 w-4 text-slate-500" />
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={volume}
+                    onChange={(e) => setVolume(Number(e.currentTarget.value))}
+                    className="w-2/3 accent-brand-500"
                   />
                 </div>
               </div>
@@ -1055,6 +1050,51 @@ export default function App(): JSX.Element {
                 className="hidden"
                 controls
               />
+            </div>
+          </div>
+
+          {/* Playlist (below player) */}
+          <div className="mt-8">
+            <div className="rounded-xl p-5 ring-1 ring-black/10 dark:ring-white/10 bg-white/60 dark:bg-slate-800/40">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm uppercase tracking-wide text-slate-500">Playlist</h3>
+                <span className="text-xs text-slate-500">{tracks.length} {tracks.length === 1 ? 'track' : 'tracks'}</span>
+              </div>
+              {tracks.length === 0 ? (
+                <p className="text-slate-500 text-sm">No songs yet. Upload MP3 or WAV files to get started.</p>
+              ) : (
+                <ul className="divide-y divide-slate-200/50 dark:divide-slate-700/40">
+                  {tracks.map((t, idx) => {
+                    const active = idx === currentIndex
+                    return (
+                      <li key={t.id}>
+                        <button
+                          className={`w-full text-left px-3 py-2 rounded-md hover:bg-slate-100/60 dark:hover:bg-slate-700/30 transition ${active ? 'bg-slate-100/60 dark:bg-slate-700/30 text-brand-500' : ''}`}
+                          onClick={() => {
+                            setCurrentIndex(idx)
+                            setCurrentTime(0)
+                            shouldAutoplayRef.current = true
+                            const audio = audioRef.current
+                            if (audio) {
+                              try { audio.currentTime = 0; void audio.play(); setIsPlaying(true) } catch { setPlaybackBlocked(true) }
+                            }
+                            if (channelRef.current) {
+                              channelRef.current.send({ type: 'broadcast', event: 'player:select', payload: { index: idx, sender: clientIdRef.current } })
+                              channelRef.current.send({ type: 'broadcast', event: 'player:play', payload: { index: idx, time: 0, sender: clientIdRef.current } })
+                            }
+                          }}
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs w-6 text-slate-500">{idx + 1}</span>
+                            <span className="truncate" title={t.name}>{t.name}</span>
+                            {active && isPlaying && <span aria-hidden className="ml-auto text-xs">▶</span>}
+                          </div>
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
             </div>
           </div>
         </div>
