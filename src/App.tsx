@@ -1021,11 +1021,31 @@ export default function App(): JSX.Element {
       })
       setParticipants(entries)
     })
-    ch.on('presence', { event: 'join' }, ({ key, newPresences }) => {
-      const name = newPresences?.[0]?.name || clientIdToNameRef.current.get(key) || 'Guest'
-      clientIdToNameRef.current.set(key, name)
-      addToast(`${name} joined the room`, 'success')
-    })
+          ch.on('presence', { event: 'join' }, ({ key, newPresences }) => {
+        const name = newPresences?.[0]?.name || clientIdToNameRef.current.get(key) || 'Guest'
+        clientIdToNameRef.current.set(key, name)
+        addToast(`${name} joined the room`, 'success')
+        
+        // If this is a new user joining (not us), and we're the host, send them current state
+        if (key !== clientIdRef.current && isHost) {
+          console.log('New user joined, sending current state to:', name)
+          const audio = audioRef.current
+          const currentTime = audio ? audio.currentTime : 0
+          
+          // Send current state to the new user
+          ch.send({
+            type: 'broadcast',
+            event: 'player:state_response',
+            payload: {
+              index: currentIndexRef.current,
+              time: currentTime,
+              isPlaying: isPlaying,
+              sender: clientIdRef.current,
+              target: key
+            }
+          })
+        }
+      })
     ch.on('presence', { event: 'leave' }, ({ key, leftPresences }) => {
       const name = leftPresences?.[0]?.name || clientIdToNameRef.current.get(key) || 'Guest'
       addToast(`${name} left the room`, 'info')
@@ -1047,10 +1067,44 @@ export default function App(): JSX.Element {
         if (!url) continue
         added.push({ id: it.path, url, name: it.name, path: it.path })
       }
-      if (added.length > 0) {
-        setTracks(prev => [...prev, ...added])
-        addToast(`${added.length} track(s) added`, 'success')
-      }
+              if (added.length > 0) {
+          setTracks(prev => {
+            const newTracks = [...prev, ...added]
+            
+            // Check if we have pending state sync that we can now apply
+            if (pendingRemotePlayRef.current && newTracks.length > 0) {
+              const { index, time } = pendingRemotePlayRef.current
+              if (index >= 0 && index < newTracks.length) {
+                console.log('Tracks loaded, applying pending state sync:', { index, time })
+                setTimeout(() => {
+                  setCurrentIndex(index)
+                  setCurrentTime(time)
+                  shouldAutoplayRef.current = true
+                  pendingRemotePlayRef.current = null
+                  
+                  // Try to start playback if it was supposed to be playing
+                  const audio = audioRef.current
+                  if (audio && shouldAutoplayRef.current) {
+                    setTimeout(async () => {
+                      try {
+                        audio.currentTime = time
+                        await audio.play()
+                        setIsPlaying(true)
+                        console.log('Pending state sync: playback started')
+                      } catch (e) {
+                        console.log('Pending state sync play failed:', e)
+                        setPlaybackBlocked(true)
+                      }
+                    }, 100)
+                  }
+                }, 100)
+              }
+            }
+            
+            return newTracks
+          })
+          addToast(`${added.length} track(s) added`, 'success')
+        }
     })
 
     ch.on('broadcast', { event: 'player:play' }, ({ payload }) => {
@@ -1222,7 +1276,14 @@ export default function App(): JSX.Element {
         target: string;
       }
       
-      console.log('Syncing with host state:', { index, time, remoteIsPlaying, currentIndex: currentIndexRef.current })
+      console.log('Syncing with host state:', { index, time, remoteIsPlaying, currentIndex: currentIndexRef.current, tracksLength: tracksRef.current.length })
+      
+      // If we don't have tracks yet, queue the state for later
+      if (tracksRef.current.length === 0) {
+        console.log('No tracks loaded yet, queuing state sync')
+        pendingRemotePlayRef.current = { index, time }
+        return
+      }
       
       // Update local state to match host
       if (index >= 0 && index < tracksRef.current.length) {
@@ -1244,6 +1305,7 @@ export default function App(): JSX.Element {
         
         if (remoteIsPlaying && !isPlaying) {
           // Host is playing, so we should play too
+          console.log('State sync: host is playing, starting playback')
           shouldAutoplayRef.current = true
           const audio = audioRef.current
           if (audio && audio.readyState >= 2) { // HAVE_CURRENT_DATA or higher
@@ -1258,6 +1320,7 @@ export default function App(): JSX.Element {
           }
         } else if (!remoteIsPlaying && isPlaying) {
           // Host is paused, so we should pause too
+          console.log('State sync: host is paused, pausing playback')
           const audio = audioRef.current
           if (audio) {
             audio.pause()
@@ -1267,6 +1330,8 @@ export default function App(): JSX.Element {
         
         setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
         addToast('Synced with host player state', 'info')
+      } else {
+        console.log('Invalid index received:', index, 'tracks length:', tracksRef.current.length)
       }
     })
 
@@ -1304,6 +1369,29 @@ export default function App(): JSX.Element {
       if (status === 'SUBSCRIBED') {
         // Track self presence with name
         await ch.track({ name: displayName || 'Guest' })
+        
+        // If we're not the host, immediately request current state
+        if (!isHost) {
+          console.log('Joined room, requesting current state from host')
+          
+          // Function to request state with retry
+          const requestState = () => {
+            ch.send({
+              type: 'broadcast',
+              event: 'player:request_state',
+              payload: { sender: clientIdRef.current }
+            })
+          }
+          
+          // Initial request after a small delay
+          setTimeout(requestState, 500)
+          
+          // Retry after 2 seconds if no response
+          setTimeout(requestState, 2000)
+          
+          // Final retry after 5 seconds
+          setTimeout(requestState, 5000)
+        }
       }
     })
     channelRef.current = ch
@@ -1651,6 +1739,10 @@ export default function App(): JSX.Element {
             setRoomCode(savedRoom)
             setInRoom(true)
             setIsHost(savedHost === '1')
+            
+            // Don't restore any player state from localStorage - let the host sync us
+            // This prevents restart issues when resuming sessions
+            console.log('Session restored, waiting for host sync...')
           } else {
             try {
               localStorage.removeItem('groovebox_room')
