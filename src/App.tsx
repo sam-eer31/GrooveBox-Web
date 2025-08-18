@@ -906,15 +906,15 @@ export default function App(): JSX.Element {
   return (
     <div className={`min-h-full flex flex-col ${theme==='dark'?'bg-black text-white':'bg-white text-black'}`}>
       <header className="border-b border-black/10 dark:border-white/10">
-        <div className="container-pro flex h-16 items-center gap-3">
+        <div className="container-pro flex h-14 sm:h-16 items-center gap-2 sm:gap-3">
           <div className="flex items-center gap-3 flex-1">
-            <div className="h-8 w-8 rounded-md bg-brand-500/20 ring-1 ring-brand-500/40 grid place-items-center">
-              <Music className="h-4 w-4 text-brand-500" />
+            <div className="h-7 w-7 sm:h-8 sm:w-8 rounded-md bg-brand-500/20 ring-1 ring-brand-500/40 grid place-items-center">
+              <Music className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-brand-500" />
             </div>
             <div className="min-w-0">
-              <h1 className="text-base md:text-lg font-semibold tracking-tight">GrooveBox</h1>
-              <p className="text-[11px] text-black/60 dark:text-white/60 truncate">
-                Room <span className="font-mono px-1.5 py-0.5 rounded-md bg-black/5 dark:bg-white/10">{roomCode}</span>
+              <h1 className="text-sm sm:text-base md:text-lg font-semibold tracking-tight">GrooveBox</h1>
+              <p className="text-[10px] sm:text-[11px] text-black/60 dark:text-white/60 truncate">
+                Room <span className="font-mono px-1 py-0.5 rounded-md bg-black/5 dark:bg-white/10">{roomCode}</span>
                 {isHost && <span className="ml-2 text-brand-500">Host</span>}
                 {roomTitle && <span className="ml-2">· {roomTitle}</span>}
               </p>
@@ -946,7 +946,7 @@ export default function App(): JSX.Element {
           </div>
           <button
             onClick={() => setTheme(theme==='dark'?'light':'dark')}
-            className="icon-btn ml-2"
+            className="icon-btn ml-1 sm:ml-2 h-8 w-8 sm:h-9 sm:w-9"
             aria-label="Toggle theme"
             title={theme==='dark'?'Switch to light':'Switch to dark'}
           >
@@ -956,7 +956,7 @@ export default function App(): JSX.Element {
       </header>
 
       <main className="flex-1">
-        <div className="container-pro py-6">
+        <div className="container-pro py-4 sm:py-6">
           {playbackBlocked && (
             <div className="mb-4 rounded-md border border-yellow-500/40 bg-yellow-400/10 text-yellow-200 px-3 py-2 text-sm flex items-center justify-between">
               <span>Playback is blocked by your browser. Click to enable synced playback.</span>
@@ -978,42 +978,42 @@ export default function App(): JSX.Element {
           {toast && <div className="mb-3 text-xs text-black/70 dark:text-white/70">{toast}</div>}
           {error && inRoom && <div className="hidden">{setTimeout(()=>setError(null),0)}</div>}
 
-          <div className="grid lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-2">
+          <div className="grid lg:grid-cols-3 gap-4 sm:gap-6">
+            <div className="lg:col-span-2 min-w-0">
               {/* Upload area moved to modal */}
 
-              <div className="mt-6 card p-5 sm:p-6 md:p-7 shadow-soft">
-                <div className="flex flex-col sm:flex-row items-center gap-4 sm:gap-5">
-                  <div className="h-14 w-14 sm:h-16 sm:w-16 md:h-20 md:w-20 rounded-lg bg-gradient-to-br from-brand-500/30 to-white/10 grid place-items-center ring-1 ring-white/10 shrink-0">
-                    <Music className="h-7 w-7 text-brand-500" />
+              <div className="mt-4 sm:mt-6 card p-3 sm:p-6 md:p-7 shadow-soft">
+                <div className="flex flex-col sm:flex-row items-center gap-2.5 sm:gap-5">
+                  <div className="h-10 w-10 sm:h-16 sm:w-16 md:h-20 md:w-20 rounded-lg bg-gradient-to-br from-brand-500/30 to-white/10 grid place-items-center ring-1 ring-white/10 shrink-0">
+                    <Music className="h-5 w-5 sm:h-7 sm:w-7 text-brand-500" />
                   </div>
                   <div className="min-w-0 flex-1 w-full">
-                    <p className="text-[11px] uppercase tracking-wide text-black/60 dark:text-white/60 text-center sm:text-left">Now Playing</p>
-                    <h2 className="mt-1 text-base sm:text-lg md:text-xl font-semibold truncate text-center sm:text-left" title={fileName}>{fileName}</h2>
-                    <div className="mt-3 flex items-center justify-center gap-2 sm:gap-3 flex-wrap">
+                    <p className="hidden sm:block text-[11px] uppercase tracking-wide text-black/60 dark:text-white/60">Now Playing</p>
+                    <h2 className="mt-1 text-[13px] sm:text-base md:text-lg font-semibold truncate text-center sm:text-left" title={fileName}>{fileName}</h2>
+                    <div className="mt-2 flex items-center justify-center gap-1.5 sm:gap-3 flex-wrap">
                       <button
                         onClick={goPrevious}
                         disabled={!hasPrevious}
-                        className="icon-btn h-9 w-9 sm:h-10 sm:w-10 rounded-full"
+                        className="icon-btn h-8 w-8 sm:h-10 sm:w-10 rounded-full"
                         aria-label="Previous"
                       >
-                        <SkipBack className="h-4 w-4" />
+                        <SkipBack className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                       </button>
                       <button
                         onClick={togglePlay}
                         disabled={!currentTrack}
-                        className="inline-flex items-center justify-center h-11 w-11 sm:h-12 sm:w-12 rounded-full bg-brand-500 text-black hover:brightness-110 disabled:opacity-50"
+                        className="inline-flex items-center justify-center h-9 w-9 sm:h-12 sm:w-12 rounded-full bg-brand-500 text-black hover:brightness-110 disabled:opacity-50"
                         aria-label={isPlaying ? 'Pause' : 'Play'}
                       >
-                        {isPlaying ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6" />}
+                        {isPlaying ? <Pause className="h-5 w-5 sm:h-6 sm:w-6" /> : <Play className="h-5 w-5 sm:h-6 sm:w-6" />}
                       </button>
                       <button
                         onClick={goNext}
                         disabled={!hasNext}
-                        className="icon-btn h-9 w-9 sm:h-10 sm:w-10 rounded-full"
+                        className="icon-btn h-8 w-8 sm:h-10 sm:w-10 rounded-full"
                         aria-label="Next"
                       >
-                        <SkipForward className="h-4 w-4" />
+                        <SkipForward className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                       </button>
                     </div>
                   </div>
@@ -1030,7 +1030,7 @@ export default function App(): JSX.Element {
                     />
                   </div>
                 </div>
-                <div className="mt-4">
+                <div className="mt-3">
                   <input
                     type="range"
                     min={0}
@@ -1038,25 +1038,14 @@ export default function App(): JSX.Element {
                     step={0.1}
                     value={currentTime}
                     onChange={(e) => onSeek(Number(e.currentTarget.value))}
-                    className="w-full accent-brand-500 touch-pan-x"
+                    className="w-full accent-brand-500 touch-pan-x h-2"
                     disabled={!currentTrack}
                   />
-                  <div className="mt-1 flex justify-between text-[11px] text-black/60 dark:text-white/60">
+                  <div className="mt-1 flex justify-between text-[10px] text-black/60 dark:text-white/60">
                     <span>{formatTime(currentTime)}</span>
                     <span>{formatTime(duration)}</span>
                   </div>
-                  <div className="mt-3 flex items-center gap-2 md:hidden">
-                    <Volume2 className="h-4 w-4 text-black/60 dark:text-white/60" />
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.01}
-                      value={volume}
-                      onChange={(e) => setVolume(Number(e.currentTarget.value))}
-                      className="w-full max-w-[260px] accent-brand-500"
-                    />
-                  </div>
+                  {/* Hide mobile volume; device buttons control volume on mobile like Spotify */}
                 </div>
 
                 <audio
@@ -1079,8 +1068,8 @@ export default function App(): JSX.Element {
               </div>
             </div>
 
-            <div>
-              <div className="panel p-5">
+            <div className="min-w-0">
+              <div className="panel p-4 sm:p-5">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-xs uppercase tracking-wide text-black/60 dark:text-white/60">Playlist</h3>
                   <span className="text-[11px] text-black/60 dark:text-white/60">{tracks.length} {tracks.length === 1 ? 'track' : 'tracks'}</span>
@@ -1094,7 +1083,7 @@ export default function App(): JSX.Element {
                       return (
                         <li key={t.id}>
                           <button
-                            className={`w-full text-left px-3 py-2 rounded-md transition ${active ? 'bg-black/5 dark:bg-white/10 text-brand-500' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}
+                            className={`w-full text-left px-2.5 sm:px-3 py-2 rounded-md transition ${active ? 'bg-black/5 dark:bg-white/10 text-brand-500' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}
                             onClick={() => {
                               setCurrentIndex(idx)
                               setCurrentTime(0)
@@ -1109,8 +1098,8 @@ export default function App(): JSX.Element {
                               }
                             }}
                           >
-                            <div className="flex items-center gap-3">
-                              <span className="text-[11px] w-6 text-black/60 dark:text-white/60">{idx + 1}</span>
+                            <div className="flex items-center gap-2.5 sm:gap-3">
+                              <span className="text-[10px] sm:text-[11px] w-6 text-black/60 dark:text-white/60">{idx + 1}</span>
                               <span className="truncate" title={t.name}>{t.name}</span>
                               {active && isPlaying && <span aria-hidden className="ml-auto text-xs">▶</span>}
                             </div>
