@@ -52,6 +52,8 @@ export default function App(): JSX.Element {
   const clientIdRef = useRef<string>('')
   const isApplyingRemoteRef = useRef<boolean>(false)
   const pendingRemotePlayRef = useRef<{ index: number; time: number } | null>(null)
+  const tracksRef = useRef<Track[]>([])
+  const currentIndexRef = useRef<number>(-1)
 
   // Cleanup local object URLs on unmount
   useEffect(() => {
@@ -68,6 +70,10 @@ export default function App(): JSX.Element {
       audioRef.current.volume = volume
     }
   }, [volume])
+
+  // Keep refs in sync to avoid stale closures in realtime handlers
+  useEffect(() => { tracksRef.current = tracks }, [tracks])
+  useEffect(() => { currentIndexRef.current = currentIndex }, [currentIndex])
 
   const onFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return
@@ -246,7 +252,7 @@ export default function App(): JSX.Element {
       try {
         await audio.play()
         setIsPlaying(true)
-        broadcastState('play', { index: Math.max(0, currentIndex), time: audio.currentTime })
+        broadcastState('play', { index: Math.max(0, currentIndexRef.current), time: audio.currentTime })
       } catch (err) {
         setError('Unable to play the audio in this browser.')
       }
@@ -294,21 +300,25 @@ export default function App(): JSX.Element {
   const hasNext = currentIndex >= 0 && currentIndex < tracks.length - 1
 
   const goPrevious = () => {
-    if (!hasPrevious) return
-    setCurrentIndex(idx => Math.max(0, idx - 1))
+    const hasPrev = currentIndexRef.current > 0
+    if (!hasPrev) return
+    const nextIndex = Math.max(0, currentIndexRef.current - 1)
+    setCurrentIndex(nextIndex)
     setCurrentTime(0)
     shouldAutoplayRef.current = true
-    if (channelRef.current) {
+    if (channelRef.current && !isApplyingRemoteRef.current) {
       channelRef.current.send({ type: 'broadcast', event: 'player:previous', payload: { sender: clientIdRef.current } })
     }
   }
 
   const goNext = () => {
-    if (!hasNext) return
-    setCurrentIndex(idx => Math.min(tracks.length - 1, idx + 1))
+    const hasN = currentIndexRef.current >= 0 && currentIndexRef.current < tracksRef.current.length - 1
+    if (!hasN) return
+    const nextIndex = Math.min(tracksRef.current.length - 1, currentIndexRef.current + 1)
+    setCurrentIndex(nextIndex)
     setCurrentTime(0)
     shouldAutoplayRef.current = true
-    if (channelRef.current) {
+    if (channelRef.current && !isApplyingRemoteRef.current) {
       channelRef.current.send({ type: 'broadcast', event: 'player:next', payload: { sender: clientIdRef.current } })
     }
   }
@@ -471,14 +481,14 @@ export default function App(): JSX.Element {
       if (!payload || payload.sender === clientIdRef.current) return
       const { index, time } = payload as { index: number; time: number }
       // If we don't yet have tracks or the index is out of range, queue it
-      if (tracks.length === 0 || index >= tracks.length) {
+      if (tracksRef.current.length === 0 || index >= tracksRef.current.length) {
         pendingRemotePlayRef.current = { index, time }
         return
       }
       isApplyingRemoteRef.current = true
       shouldAutoplayRef.current = true
       // If index changed, update and wait for metadata; else just play current
-      if (currentIndex !== index) {
+      if (currentIndexRef.current !== index) {
         setCurrentIndex(index)
         setCurrentTime(time)
       } else {
