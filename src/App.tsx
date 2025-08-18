@@ -771,8 +771,7 @@ export default function App(): JSX.Element {
             id="file-input"
             ref={inputRef}
             type="file"
-            accept="audio/*"
-            capture
+            accept=".mp3,.wav,.m4a,.aac,audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/wave,audio/aac,audio/mp4,audio/m4a,audio/x-m4a,audio/*"
             multiple
             className="sr-only"
             onChange={(e) => onFiles(e.currentTarget.files)}
@@ -780,6 +779,7 @@ export default function App(): JSX.Element {
           <label
             htmlFor="file-input"
             className="rounded-md bg-brand-500 text-slate-900 font-medium px-4 py-2 hover:brightness-110 active:brightness-110 transition cursor-pointer"
+            onClick={() => { if (inputRef.current) inputRef.current.value = '' }}
           >
             Upload
           </label>
@@ -820,6 +820,7 @@ export default function App(): JSX.Element {
             <label
               htmlFor="file-input"
               className="mt-3 inline-block rounded-md border border-slate-700 px-4 py-2 hover:border-brand-500/60 hover:text-brand-500 transition cursor-pointer"
+              onClick={() => { if (inputRef.current) inputRef.current.value = '' }}
             >
               Choose Files
             </label>
