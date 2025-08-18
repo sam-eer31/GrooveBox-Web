@@ -43,6 +43,7 @@ export default function App(): JSX.Element {
   const [roomTitleInput, setRoomTitleInput] = useState<string>('')
   const [participants, setParticipants] = useState<Array<{ key: string; name: string }>>([])
   const [toast, setToast] = useState<string | null>(null)
+  const [playbackBlocked, setPlaybackBlocked] = useState<boolean>(false)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -145,7 +146,8 @@ export default function App(): JSX.Element {
           const next = [...prev, ...uploadedTracks]
           if (prev.length === 0) {
             setCurrentIndex(0)
-            shouldAutoplayRef.current = true
+            // Do not autoplay on upload; wait for explicit play action
+            shouldAutoplayRef.current = false
           }
           return next
         })
@@ -231,6 +233,12 @@ export default function App(): JSX.Element {
     e.stopPropagation()
   }
 
+  const broadcastState = (event: 'play' | 'pause', payload: any) => {
+    if (channelRef.current) {
+      channelRef.current.send({ type: 'broadcast', event: `player:${event}`, payload: { ...payload, sender: clientIdRef.current } })
+    }
+  }
+
   const togglePlay = async () => {
     const audio = audioRef.current
     if (!audio) return
@@ -238,18 +246,14 @@ export default function App(): JSX.Element {
       try {
         await audio.play()
         setIsPlaying(true)
-        if (channelRef.current) {
-          channelRef.current.send({ type: 'broadcast', event: 'player:play', payload: { index: Math.max(0, currentIndex), time: audio.currentTime, sender: clientIdRef.current } })
-        }
+        broadcastState('play', { index: Math.max(0, currentIndex), time: audio.currentTime })
       } catch (err) {
         setError('Unable to play the audio in this browser.')
       }
     } else {
       audio.pause()
       setIsPlaying(false)
-      if (channelRef.current) {
-        channelRef.current.send({ type: 'broadcast', event: 'player:pause', payload: { time: audio.currentTime, sender: clientIdRef.current } })
-      }
+      broadcastState('pause', { time: audio.currentTime })
     }
   }
 
@@ -473,8 +477,20 @@ export default function App(): JSX.Element {
       }
       isApplyingRemoteRef.current = true
       shouldAutoplayRef.current = true
-      setCurrentIndex(index)
-      setCurrentTime(time)
+      // If index changed, update and wait for metadata; else just play current
+      if (currentIndex !== index) {
+        setCurrentIndex(index)
+        setCurrentTime(time)
+      } else {
+        const audio = audioRef.current
+        if (audio) {
+          try {
+            audio.currentTime = time
+            void audio.play()
+            setIsPlaying(true)
+          } catch {}
+        }
+      }
       // Try to play immediately; if metadata not ready, loadedmetadata handler will also trigger play
       setTimeout(() => {
         const audio = audioRef.current
@@ -715,7 +731,7 @@ export default function App(): JSX.Element {
                           onClick={() => {
                             setCurrentIndex(idx)
                             setCurrentTime(0)
-                            shouldAutoplayRef.current = true
+                            shouldAutoplayRef.current = false
                             if (channelRef.current) {
                               channelRef.current.send({ type: 'broadcast', event: 'player:select', payload: { index: idx, sender: clientIdRef.current } })
                             }
