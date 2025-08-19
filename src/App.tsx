@@ -128,6 +128,7 @@ export default function App(): JSX.Element {
   const uploadCancelRef = useRef<boolean>(false)
   const uploadedPathsRef = useRef<string[]>([])
   const clientIdToNameRef = useRef<Map<string, string>>(new Map())
+  const displayNameRef = useRef<string>('')
 
   // Toast helpers bound to state
   const addToast = (message: string, type: Toast['type'] = 'info', duration: number = 3000) => {
@@ -154,6 +155,9 @@ export default function App(): JSX.Element {
       audioRef.current.volume = volume
     }
   }, [volume])
+
+  // Keep displayName ref in sync to avoid stale closures when tracking presence
+  useEffect(() => { displayNameRef.current = displayName }, [displayName])
 
   // Keep refs in sync to avoid stale closures in realtime handlers
   useEffect(() => { tracksRef.current = tracks }, [tracks])
@@ -567,7 +571,8 @@ export default function App(): JSX.Element {
     loadFromSupabase()
   }, [inRoom, roomCode])
 
-  // If the displayName changes while connected, update presence metadata so others see the new name
+  // If the displayName changes while connected, update presence metadata so others see the new name.
+  // Also update localStorage so refreshes pick up the latest name.
   useEffect(() => {
     const ch = channelRef.current
     if (!inRoom || !ch) return
@@ -576,6 +581,7 @@ export default function App(): JSX.Element {
     try {
       void ch.track({ name })
     } catch {}
+    try { localStorage.setItem('groovebox_name', name) } catch {}
   }, [displayName, inRoom])
 
   const onDrop: React.DragEventHandler<HTMLDivElement> = (e) => {
@@ -1404,7 +1410,7 @@ export default function App(): JSX.Element {
     ch.subscribe(async (status) => {
       if (status === 'SUBSCRIBED') {
         // Track self presence with name
-        await ch.track({ name: displayName || 'Guest' })
+        await ch.track({ name: displayNameRef.current || 'Guest' })
         
         // If we're not the host, immediately request current state
         if (!isHost) {
@@ -1772,6 +1778,7 @@ export default function App(): JSX.Element {
         // Only restore name if it's not empty and valid
         if (savedName && savedName.trim().length > 0) {
           setDisplayName(savedName.trim())
+          displayNameRef.current = savedName.trim()
         }
         
         if (savedRoom && supabase) {
