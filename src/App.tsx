@@ -144,105 +144,141 @@ export default function App(): JSX.Element {
   const displayNameRef = useRef<string>('')
   const pendingSelfNameRef = useRef<string | null>(null)
 
-  // Timestamp-based automatic conflict resolution system
-  const recentCommandsRef = useRef<Array<{ command: string; payload: any; sender: string; timestamp: number; id: string }>>([])
-  const conflictWindowMs = 500 // 500ms window for conflict detection
-  const isProcessingConflictRef = useRef<boolean>(false)
+  // Server-authoritative simulation with distributed consensus
+  const roomStateRef = useRef<{ version: number; lastUpdate: number; isLocked: boolean; pendingCommands: Array<{ id: string; command: string; payload: any; sender: string; timestamp: number }> }>({
+    version: 0,
+    lastUpdate: 0,
+    isLocked: false,
+    pendingCommands: []
+  })
+  
+  const isAuthorityRef = useRef<boolean>(false)
+  const authorityClientRef = useRef<string>('')
+  const commandIdRef = useRef<number>(0)
 
-  const executeCommandImmediately = async (command: string, payload: any) => {
-    // Execute immediately for responsive UI
-    try {
-      switch (command) {
-        case 'play':
-          await executePlayCommand(payload)
-          break
-        case 'pause':
-          await executePauseCommand(payload)
-          break
-        case 'seek':
-          await executeSeekCommand(payload)
-          break
-        case 'next':
-          await executeNextCommand(payload)
-          break
-        case 'previous':
-          await executePreviousCommand(payload)
-          break
-        case 'select':
-          await executeSelectCommand(payload)
-          break
+  // Determine authority (client with lowest ID becomes authority)
+  const determineAuthority = () => {
+    const allClients = Array.from(participants).map(p => p.key).concat([clientIdRef.current])
+    allClients.sort()
+    const newAuthority = allClients[0]
+    
+    if (newAuthority !== authorityClientRef.current) {
+      authorityClientRef.current = newAuthority
+      isAuthorityRef.current = newAuthority === clientIdRef.current
+      console.log(`Authority changed to: ${newAuthority}, isAuthority: ${isAuthorityRef.current}`)
+      
+      // If we became authority, process any pending commands
+      if (isAuthorityRef.current) {
+        processPendingCommands()
       }
-    } catch (error) {
-      console.warn(`Immediate command ${command} failed:`, error)
     }
   }
 
-  const processConflicts = async () => {
-    if (isProcessingConflictRef.current) return
-    isProcessingConflictRef.current = true
-
-    try {
-      const now = Date.now()
-      const recentCommands = recentCommandsRef.current.filter(cmd => now - cmd.timestamp < conflictWindowMs)
-      
-      if (recentCommands.length > 1) {
-        console.log(`Conflict detected! ${recentCommands.length} commands within ${conflictWindowMs}ms window`)
+  // Process commands as authority
+  const processPendingCommands = async () => {
+    if (!isAuthorityRef.current || roomStateRef.current.isLocked) return
+    
+    const pending = roomStateRef.current.pendingCommands
+    if (pending.length === 0) return
+    
+    // Sort by timestamp (oldest first)
+    pending.sort((a, b) => a.timestamp - b.timestamp)
+    
+    roomStateRef.current.isLocked = true
+    
+    for (const cmd of pending) {
+      try {
+        console.log(`Authority processing command: ${cmd.command} from ${cmd.sender}`, cmd.payload)
         
-        // Sort by timestamp (latest first)
-        recentCommands.sort((a, b) => b.timestamp - a.timestamp)
+        // Execute the command
+        await executeCommand(cmd.command, cmd.payload)
         
-        // Get the latest command (winner)
-        const winningCommand = recentCommands[0]
-        console.log(`Winning command: ${winningCommand.command} from ${winningCommand.sender} at ${winningCommand.timestamp}`)
+        // Update room state version
+        roomStateRef.current.version++
+        roomStateRef.current.lastUpdate = Date.now()
         
-        // Apply the winning command to resolve conflict
-        await executeCommandImmediately(winningCommand.command, winningCommand.payload)
-        
-        // Broadcast the winning command to all clients
+        // Broadcast authoritative state update
         if (channelRef.current) {
           channelRef.current.send({
             type: 'broadcast',
-            event: 'player:conflict_resolved',
-            payload: { 
-              command: winningCommand.command, 
-              payload: winningCommand.payload, 
-              sender: winningCommand.sender, 
-              timestamp: winningCommand.timestamp,
-              id: winningCommand.id
+            event: 'player:authoritative_update',
+            payload: {
+              command: cmd.command,
+              payload: cmd.payload,
+              version: roomStateRef.current.version,
+              timestamp: roomStateRef.current.lastUpdate,
+              commandId: cmd.id
             }
           })
         }
+        
+        // Remove processed command
+        roomStateRef.current.pendingCommands = roomStateRef.current.pendingCommands.filter(c => c.id !== cmd.id)
+        
+      } catch (error) {
+        console.warn(`Authority command ${cmd.command} failed:`, error)
       }
-      
-      // Clean up old commands
-      recentCommandsRef.current = recentCommandsRef.current.filter(cmd => now - cmd.timestamp < conflictWindowMs)
-      
-    } finally {
-      isProcessingConflictRef.current = false
+    }
+    
+    roomStateRef.current.isLocked = false
+    
+    // Process any new commands that arrived while processing
+    if (roomStateRef.current.pendingCommands.length > 0) {
+      setTimeout(processPendingCommands, 0)
     }
   }
 
-  const sendCommand = (command: string, payload: any) => {
+  const executeCommand = async (command: string, payload: any) => {
+    switch (command) {
+      case 'play':
+        await executePlayCommand(payload)
+        break
+      case 'pause':
+        await executePauseCommand(payload)
+        break
+      case 'seek':
+        await executeSeekCommand(payload)
+        break
+      case 'next':
+        await executeNextCommand(payload)
+        break
+      case 'previous':
+        await executePreviousCommand(payload)
+        break
+      case 'select':
+        await executeSelectCommand(payload)
+        break
+    }
+  }
+
+  const sendAuthoritativeCommand = (command: string, payload: any) => {
+    const commandId = `${clientIdRef.current}-${++commandIdRef.current}`
     const timestamp = Date.now()
-    const id = crypto.randomUUID?.() || Math.random().toString(36).slice(2)
     
-    // Execute immediately for responsive UI
-    executeCommandImmediately(command, payload)
+    const newCommand = {
+      id: commandId,
+      command,
+      payload,
+      sender: clientIdRef.current,
+      timestamp
+    }
     
-    // Add to recent commands for conflict detection
-    recentCommandsRef.current.push({ command, payload, sender: clientIdRef.current, timestamp, id })
+    // Add to pending commands
+    roomStateRef.current.pendingCommands.push(newCommand)
     
-    // Broadcast to all clients
+    // Broadcast command request to all clients
     if (channelRef.current) {
       channelRef.current.send({
         type: 'broadcast',
-        event: 'player:command_sent',
-        payload: { command, payload, sender: clientIdRef.current, timestamp, id }
+        event: 'player:command_request',
+        payload: newCommand
       })
     }
     
-    // Process conflicts after a short delay
-    setTimeout(processConflicts, conflictWindowMs + 100)
+    // If we're the authority, process immediately
+    if (isAuthorityRef.current) {
+      processPendingCommands()
+    }
   }
 
   // Command execution handlers (same for all clients)
@@ -787,9 +823,9 @@ export default function App(): JSX.Element {
     if (!audio) return
     
     if (audio.paused) {
-      sendCommand('play', { index: Math.max(0, currentIndexRef.current), time: audio.currentTime })
+      sendAuthoritativeCommand('play', { index: Math.max(0, currentIndexRef.current), time: audio.currentTime })
     } else {
-      sendCommand('pause', { time: audio.currentTime })
+      sendAuthoritativeCommand('pause', { time: audio.currentTime })
     }
   }
 
@@ -865,7 +901,7 @@ export default function App(): JSX.Element {
 
   const onSeek = (value: number) => {
     if (isApplyingRemoteRef.current) return
-    sendCommand('seek', { time: value })
+    sendAuthoritativeCommand('seek', { time: value })
   }
 
   const currentTrack = tracks[currentIndex] ?? null
@@ -877,13 +913,13 @@ export default function App(): JSX.Element {
   const goPrevious = () => {
     const hasPrev = currentIndexRef.current > 0
     if (!hasPrev) return
-    sendCommand('previous', {})
+    sendAuthoritativeCommand('previous', {})
   }
 
   const goNext = () => {
     const hasN = currentIndexRef.current >= 0 && currentIndexRef.current < tracksRef.current.length - 1
     if (!hasN) return
-    sendCommand('next', {})
+    sendAuthoritativeCommand('next', {})
   }
 
   // When metadata loads for a new track, autoplay if flagged
@@ -1211,37 +1247,46 @@ export default function App(): JSX.Element {
         entries.push({ key, name, isHost: isHostMeta })
       })
       setParticipants(entries)
+      
+      // Determine authority whenever participants change
+      determineAuthority()
     })
-          ch.on('presence', { event: 'join' }, ({ key, newPresences }) => {
-        const latest = newPresences?.[newPresences.length - 1]
-        const name = latest?.name || clientIdToNameRef.current.get(key) || 'Guest'
-        clientIdToNameRef.current.set(key, name)
-        addToast(`${name} joined the room`, 'success')
+              ch.on('presence', { event: 'join' }, ({ key, newPresences }) => {
+      const latest = newPresences?.[newPresences.length - 1]
+      const name = latest?.name || clientIdToNameRef.current.get(key) || 'Guest'
+      clientIdToNameRef.current.set(key, name)
+      addToast(`${name} joined the room`, 'success')
+      
+      // Determine authority when someone joins
+      determineAuthority()
+      
+      // If this is a new user joining (not us), and we're the host, send them current state
+      if (key !== clientIdRef.current && isHost) {
+        console.log('New user joined, sending current state to:', name)
+        const audio = audioRef.current
+        const currentTime = audio ? audio.currentTime : 0
         
-        // If this is a new user joining (not us), and we're the host, send them current state
-        if (key !== clientIdRef.current && isHost) {
-          console.log('New user joined, sending current state to:', name)
-          const audio = audioRef.current
-          const currentTime = audio ? audio.currentTime : 0
-          
-          // Send current state to the new user
-          ch.send({
-            type: 'broadcast',
-            event: 'player:state_response',
-            payload: {
-              index: currentIndexRef.current,
-              time: currentTime,
-              isPlaying: isPlaying,
-              sender: clientIdRef.current,
-              target: key
-            }
-          })
-        }
-      })
+        // Send current state to the new user
+        ch.send({
+          type: 'broadcast',
+          event: 'player:state_response',
+          payload: {
+            index: currentIndexRef.current,
+            time: currentTime,
+            isPlaying: isPlaying,
+            sender: clientIdRef.current,
+            target: key
+          }
+        })
+      }
+    })
     ch.on('presence', { event: 'leave' }, ({ key, leftPresences }) => {
       const name = leftPresences?.[0]?.name || clientIdToNameRef.current.get(key) || 'Guest'
       addToast(`${name} left the room`, 'info')
       clientIdToNameRef.current.delete(key)
+      
+      // Determine authority when someone leaves
+      determineAuthority()
     })
 
     ch.on('broadcast', { event: 'playlist:add' }, async ({ payload }) => {
@@ -1299,52 +1344,68 @@ export default function App(): JSX.Element {
         }
     })
 
-    // Handle commands sent by any client
-    ch.on('broadcast', { event: 'player:command_sent' }, ({ payload }) => {
+    // Handle command requests from any client
+    ch.on('broadcast', { event: 'player:command_request' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
       
-      const { command, payload: cmdPayload, sender, timestamp, id } = payload
-      console.log(`Received command from ${sender}: ${command}`, cmdPayload)
+      const { id, command, payload: cmdPayload, sender, timestamp } = payload
+      console.log(`Received command request from ${sender}: ${command}`, cmdPayload)
       
-      // Add to recent commands for conflict detection
-      recentCommandsRef.current.push({ command, payload: cmdPayload, sender, timestamp, id })
-      
-      // Process conflicts after a short delay
-      setTimeout(processConflicts, conflictWindowMs + 100)
-    })
-
-    // Handle conflict resolution
-    ch.on('broadcast', { event: 'player:conflict_resolved' }, ({ payload }) => {
-      if (!payload || payload.sender === clientIdRef.current) return
-      
-      const { command, payload: cmdPayload, sender, timestamp, id } = payload
-      console.log(`Conflict resolved: ${command} from ${sender} wins`, cmdPayload)
-      
-      // Apply the winning command to sync all devices
-      isApplyingRemoteRef.current = true
-      
-      switch (command) {
-        case 'play':
-          executePlayCommand(cmdPayload)
-          break
-        case 'pause':
-          executePauseCommand(cmdPayload)
-          break
-        case 'seek':
-          executeSeekCommand(cmdPayload)
-          break
-        case 'next':
-          executeNextCommand(cmdPayload)
-          break
-        case 'previous':
-          executePreviousCommand(cmdPayload)
-          break
-        case 'select':
-          executeSelectCommand(cmdPayload)
-          break
+      // Add to pending commands (avoid duplicates)
+      const existing = roomStateRef.current.pendingCommands.find(cmd => cmd.id === id)
+      if (!existing) {
+        roomStateRef.current.pendingCommands.push({ id, command, payload: cmdPayload, sender, timestamp })
       }
       
-      setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+      // If we're the authority, process commands
+      if (isAuthorityRef.current) {
+        processPendingCommands()
+      }
+    })
+
+    // Handle authoritative updates from authority
+    ch.on('broadcast', { event: 'player:authoritative_update' }, ({ payload }) => {
+      if (!payload || payload.sender === clientIdRef.current) return
+      
+      const { command, payload: cmdPayload, version, timestamp, commandId } = payload
+      console.log(`Received authoritative update: ${command} (v${version})`, cmdPayload)
+      
+      // Check if this is a newer version
+      if (version > roomStateRef.current.version) {
+        roomStateRef.current.version = version
+        roomStateRef.current.lastUpdate = timestamp
+        
+        // Apply the authoritative command
+        isApplyingRemoteRef.current = true
+        
+        switch (command) {
+          case 'play':
+            executePlayCommand(cmdPayload)
+            break
+          case 'pause':
+            executePauseCommand(cmdPayload)
+            break
+          case 'seek':
+            executeSeekCommand(cmdPayload)
+            break
+          case 'next':
+            executeNextCommand(cmdPayload)
+            break
+          case 'previous':
+            executePreviousCommand(cmdPayload)
+            break
+          case 'select':
+            executeSelectCommand(cmdPayload)
+            break
+        }
+        
+        // Remove the processed command from pending
+        roomStateRef.current.pendingCommands = roomStateRef.current.pendingCommands.filter(cmd => cmd.id !== commandId)
+        
+        setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+      } else {
+        console.log(`Ignoring outdated authoritative update: ${command} (v${version} vs current v${roomStateRef.current.version})`)
+      }
     })
 
 
@@ -2330,8 +2391,8 @@ export default function App(): JSX.Element {
                           <button
                             className={`w-full text-left px-2.5 sm:px-3 py-2 rounded-md transition ${active ? 'bg-black/5 dark:bg-white/10 text-brand-500' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}
                             onClick={() => {
-                              sendCommand('select', { index: idx })
-                              sendCommand('play', { index: idx, time: 0 })
+                              sendAuthoritativeCommand('select', { index: idx })
+                              sendAuthoritativeCommand('play', { index: idx, time: 0 })
                             }}
                           >
                             <div className="flex items-center gap-2.5 sm:gap-3">
