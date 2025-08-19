@@ -130,154 +130,6 @@ export default function App(): JSX.Element {
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
-  // Room-wide command queue (host authoritative)
-  type RoomCommandType = 'select' | 'play' | 'pause' | 'seek' | 'next' | 'previous'
-  type RoomCommand = { id: string; type: RoomCommandType; payload: any; sender: string; ts: number }
-  type NormalizedState = { index: number; time: number; isPlaying: boolean }
-  const commandQueueRef = useRef<RoomCommand[]>([])
-  const isProcessingCommandRef = useRef<boolean>(false)
-  const commandSeqRef = useRef<number>(0)
-  const nextExpectedSeqRef = useRef<number>(1)
-  const pendingApplyBufferRef = useRef<Map<number, { seq: number; state: NormalizedState; sender: string }>>(new Map())
-  const hostIdRef = useRef<string | null>(null)
-  const isPlayingRef = useRef<boolean>(false)
-  useEffect(() => { isPlayingRef.current = isPlaying }, [isPlaying])
-
-  const applyNormalizedStateLocally = (state: NormalizedState) => {
-    const { index, time, isPlaying: shouldPlay } = state
-    const indexChanged = index !== currentIndexRef.current
-    // Always update state
-    if (indexChanged) {
-      setCurrentIndex(index)
-    }
-    setCurrentTime(time)
-    shouldAutoplayRef.current = shouldPlay
-    // If track changes, defer actual audio element manipulation to metadata/load handlers
-    if (indexChanged) {
-      if (shouldPlay) {
-        pendingRemotePlayRef.current = { index, time }
-        setIsPlaying(true)
-      } else {
-        setIsPlaying(false)
-      }
-      return
-    }
-    // Same track: update audio element now
-    const audio = audioRef.current
-    if (audio) {
-      try {
-        audio.currentTime = time
-        if (shouldPlay) {
-          void audio.play()
-          setIsPlaying(true)
-        } else {
-          audio.pause()
-          setIsPlaying(false)
-        }
-      } catch {
-        if (shouldPlay) {
-          setPlaybackBlocked(true)
-          pendingRemotePlayRef.current = { index, time }
-        }
-      }
-    } else {
-      if (shouldPlay) setIsPlaying(true); else setIsPlaying(false)
-    }
-  }
-
-  const processCommandQueueHost = async () => {
-    if (!isHost) return
-    if (isProcessingCommandRef.current) return
-    const ch = channelRef.current
-    if (!ch) return
-    isProcessingCommandRef.current = true
-    try {
-      while (commandQueueRef.current.length > 0) {
-        const cmd = commandQueueRef.current.shift()!
-        // Compute resulting normalized state from this command
-        const audio = audioRef.current
-        let targetIndex = currentIndexRef.current
-        let targetTime = audio ? audio.currentTime : currentTime
-        let targetPlaying = isPlayingRef.current
-        switch (cmd.type) {
-          case 'select': {
-            targetIndex = Math.max(0, Math.min(tracksRef.current.length - 1, cmd.payload.index ?? 0))
-            targetTime = 0
-            targetPlaying = true
-            break
-          }
-          case 'play': {
-            if (typeof cmd.payload?.index === 'number') {
-              targetIndex = Math.max(0, Math.min(tracksRef.current.length - 1, cmd.payload.index))
-            }
-            if (typeof cmd.payload?.time === 'number') {
-              targetTime = Math.max(0, cmd.payload.time)
-            }
-            targetPlaying = true
-            break
-          }
-          case 'pause': {
-            if (typeof cmd.payload?.time === 'number') {
-              targetTime = Math.max(0, cmd.payload.time)
-            } else if (audio) {
-              targetTime = audio.currentTime
-            }
-            targetPlaying = false
-            break
-          }
-          case 'seek': {
-            targetTime = Math.max(0, cmd.payload?.time ?? 0)
-            break
-          }
-          case 'next': {
-            targetIndex = Math.min(tracksRef.current.length - 1, Math.max(0, currentIndexRef.current + 1))
-            targetTime = 0
-            targetPlaying = true
-            break
-          }
-          case 'previous': {
-            targetIndex = Math.max(0, Math.min(tracksRef.current.length - 1, currentIndexRef.current - 1))
-            targetTime = 0
-            targetPlaying = true
-            break
-          }
-        }
-        // Apply locally on host
-        applyNormalizedStateLocally({ index: targetIndex, time: targetTime, isPlaying: targetPlaying })
-        // Increase sequence and broadcast authoritative apply
-        commandSeqRef.current += 1
-        try {
-          ch.send({
-            type: 'broadcast',
-            event: 'cmd:apply',
-            payload: {
-              seq: commandSeqRef.current,
-              state: { index: targetIndex, time: targetTime, isPlaying: targetPlaying },
-              sender: clientIdRef.current,
-            }
-          })
-        } catch {}
-        // Small yield to allow audio state to settle
-        await new Promise(r => setTimeout(r, 0))
-      }
-    } finally {
-      isProcessingCommandRef.current = false
-    }
-  }
-
-  const enqueueCommand = (type: RoomCommandType, payload: any = {}) => {
-    const cmd: RoomCommand = { id: crypto.randomUUID?.() || Math.random().toString(36).slice(2), type, payload, sender: clientIdRef.current || 'unknown', ts: Date.now() }
-    const ch = channelRef.current
-    if (!ch) return
-    if (isHost) {
-      commandQueueRef.current.push(cmd)
-      void processCommandQueueHost()
-    } else {
-      try {
-        ch.send({ type: 'broadcast', event: 'cmd:request', payload: cmd })
-      } catch {}
-    }
-  }
   const shouldAutoplayRef = useRef<boolean>(false)
   const channelRef = useRef<ReturnType<NonNullable<typeof supabase>['channel']> | null>(null)
   const clientIdRef = useRef<string>('')
@@ -767,17 +619,32 @@ export default function App(): JSX.Element {
   }
 
   const broadcastState = (event: 'play' | 'pause', payload: any) => {
-    // Deprecated: direct player broadcasts are replaced by host-sequenced commands
+    if (channelRef.current) {
+      channelRef.current.send({ type: 'broadcast', event: `player:${event}`, payload: { ...payload, sender: clientIdRef.current } })
+    }
   }
 
   const togglePlay = async () => {
     const audio = audioRef.current
-    const currentlyPlaying = isPlayingRef.current
-    const timeNow = audio ? audio.currentTime : currentTime
-    if (currentlyPlaying) {
-      enqueueCommand('pause', { time: timeNow })
+    if (!audio) return
+    
+    // Don't broadcast if we're applying a remote change
+    if (isApplyingRemoteRef.current) return
+    
+    if (audio.paused) {
+      try {
+        // Don't call audio.load() here - it resets the currentTime!
+        await audio.play()
+        setIsPlaying(true)
+        broadcastState('play', { index: Math.max(0, currentIndexRef.current), time: audio.currentTime })
+      } catch (err) {
+        console.warn('Playback error:', err)
+        setError('Unable to play the audio. Please try again.')
+      }
     } else {
-      enqueueCommand('play', { index: Math.max(0, currentIndexRef.current), time: timeNow })
+      audio.pause()
+      setIsPlaying(false)
+      broadcastState('pause', { time: audio.currentTime })
     }
   }
 
@@ -852,8 +719,16 @@ export default function App(): JSX.Element {
   }
 
   const onSeek = (value: number) => {
+    // Don't broadcast if we're applying a remote change
     if (isApplyingRemoteRef.current) return
-    enqueueCommand('seek', { time: value })
+    
+    const audio = audioRef.current
+    if (!audio) return
+    audio.currentTime = value
+    setCurrentTime(value)
+    if (channelRef.current) {
+      channelRef.current.send({ type: 'broadcast', event: 'player:seek', payload: { time: value, sender: clientIdRef.current } })
+    }
   }
 
   const currentTrack = tracks[currentIndex] ?? null
@@ -865,13 +740,25 @@ export default function App(): JSX.Element {
   const goPrevious = () => {
     const hasPrev = currentIndexRef.current > 0
     if (!hasPrev) return
-    enqueueCommand('previous')
+    const nextIndex = Math.max(0, currentIndexRef.current - 1)
+    setCurrentIndex(nextIndex)
+    setCurrentTime(0)
+    shouldAutoplayRef.current = true
+    if (channelRef.current && !isApplyingRemoteRef.current) {
+      channelRef.current.send({ type: 'broadcast', event: 'player:previous', payload: { sender: clientIdRef.current } })
+    }
   }
 
   const goNext = () => {
     const hasN = currentIndexRef.current >= 0 && currentIndexRef.current < tracksRef.current.length - 1
     if (!hasN) return
-    enqueueCommand('next')
+    const nextIndex = Math.min(tracksRef.current.length - 1, currentIndexRef.current + 1)
+    setCurrentIndex(nextIndex)
+    setCurrentTime(0)
+    shouldAutoplayRef.current = true
+    if (channelRef.current && !isApplyingRemoteRef.current) {
+      channelRef.current.send({ type: 'broadcast', event: 'player:next', payload: { sender: clientIdRef.current } })
+    }
   }
 
   // When metadata loads for a new track, autoplay if flagged
@@ -1108,18 +995,6 @@ export default function App(): JSX.Element {
         presence: { key: clientIdRef.current }
       }
     })
-    // Reset queue and sequencing when (re)connecting to a room
-    commandQueueRef.current = []
-    isProcessingCommandRef.current = false
-    pendingApplyBufferRef.current.clear()
-    nextExpectedSeqRef.current = 1
-    if (isHost) {
-      hostIdRef.current = clientIdRef.current
-      commandSeqRef.current = 0
-    } else {
-      hostIdRef.current = null
-    }
-
 
     // Mobile backgrounding detection and reconnection
     let isPageVisible = true
@@ -1197,7 +1072,7 @@ export default function App(): JSX.Element {
     window.addEventListener('focus', handleFocus)
     window.addEventListener('blur', handleBlur)
 
-    // Presence: track participants and host id
+    // Presence: track participants
     ch.on('presence', { event: 'sync' }, () => {
       const state = ch.presenceState() as Record<string, Array<{ name?: string; isHost?: boolean }>>
       const entries: Array<{ key: string; name: string; isHost?: boolean }> = []
@@ -1209,10 +1084,7 @@ export default function App(): JSX.Element {
         const isHostMeta = !!lastMeta?.isHost
         clientIdToNameRef.current.set(key, name)
         entries.push({ key, name, isHost: isHostMeta })
-        if (isHostMeta) hostIdRef.current = key
       })
-      // If we are host, record our id as host
-      if (isHost) hostIdRef.current = clientIdRef.current
       setParticipants(entries)
     })
           ch.on('presence', { event: 'join' }, ({ key, newPresences }) => {
@@ -1302,45 +1174,6 @@ export default function App(): JSX.Element {
         }
     })
 
-    // Command queue protocol
-    ch.on('broadcast', { event: 'cmd:request' }, ({ payload }) => {
-      if (!payload) return
-      // Only host enqueues and processes
-      if (!isHost) return
-      const cmd = payload as RoomCommand
-      commandQueueRef.current.push(cmd)
-      void processCommandQueueHost()
-    })
-
-    ch.on('broadcast', { event: 'cmd:apply' }, ({ payload }) => {
-      if (!payload) return
-      const { seq, state, sender } = payload as { seq: number; state: NormalizedState; sender: string }
-      // Accept only from host
-      if (!hostIdRef.current || sender !== hostIdRef.current) return
-      // If this is the next expected sequence, apply immediately
-      if (seq === nextExpectedSeqRef.current) {
-        isApplyingRemoteRef.current = true
-        applyNormalizedStateLocally(state)
-        nextExpectedSeqRef.current += 1
-        setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
-        // Drain any buffered subsequent states
-        while (pendingApplyBufferRef.current.has(nextExpectedSeqRef.current)) {
-          const buffered = pendingApplyBufferRef.current.get(nextExpectedSeqRef.current)!
-          pendingApplyBufferRef.current.delete(nextExpectedSeqRef.current)
-          isApplyingRemoteRef.current = true
-          applyNormalizedStateLocally(buffered.state)
-          nextExpectedSeqRef.current += 1
-          setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
-        }
-      } else if (seq > nextExpectedSeqRef.current) {
-        // Buffer out-of-order apply until missing ones arrive
-        pendingApplyBufferRef.current.set(seq, { seq, state, sender })
-      } else {
-        // Old sequence: ignore
-      }
-    })
-
-    // Fallback: keep old handlers for state_request/state_response
     ch.on('broadcast', { event: 'player:play' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
       const { index, time } = payload as { index: number; time: number }
@@ -2442,7 +2275,17 @@ export default function App(): JSX.Element {
                           <button
                             className={`w-full text-left px-2.5 sm:px-3 py-2 rounded-md transition ${active ? 'bg-black/5 dark:bg-white/10 text-brand-500' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}
                             onClick={() => {
-                              enqueueCommand('select', { index: idx })
+                              setCurrentIndex(idx)
+                              setCurrentTime(0)
+                              shouldAutoplayRef.current = true
+                              const audio = audioRef.current
+                              if (audio) {
+                                try { audio.currentTime = 0; void audio.play(); setIsPlaying(true) } catch { setPlaybackBlocked(true) }
+                              }
+                              if (channelRef.current) {
+                                channelRef.current.send({ type: 'broadcast', event: 'player:select', payload: { index: idx, sender: clientIdRef.current } })
+                                channelRef.current.send({ type: 'broadcast', event: 'player:play', payload: { index: idx, time: 0, sender: clientIdRef.current } })
+                              }
                             }}
                           >
                             <div className="flex items-center gap-2.5 sm:gap-3">
