@@ -144,80 +144,105 @@ export default function App(): JSX.Element {
   const displayNameRef = useRef<string>('')
   const pendingSelfNameRef = useRef<string | null>(null)
 
-  // Global command queue for room-wide synchronization
-  const globalCommandQueueRef = useRef<Array<{ command: string; payload: any; sender: string; timestamp: number }>>([])
-  const isProcessingGlobalQueueRef = useRef<boolean>(false)
+  // Timestamp-based automatic conflict resolution system
+  const recentCommandsRef = useRef<Array<{ command: string; payload: any; sender: string; timestamp: number; id: string }>>([])
+  const conflictWindowMs = 500 // 500ms window for conflict detection
+  const isProcessingConflictRef = useRef<boolean>(false)
 
-  const processGlobalQueue = async () => {
-    if (isProcessingGlobalQueueRef.current) return
-    
-    if (globalCommandQueueRef.current.length === 0) return
-    
-    isProcessingGlobalQueueRef.current = true
-    
-    while (globalCommandQueueRef.current.length > 0) {
-      const { command, payload, sender, timestamp } = globalCommandQueueRef.current.shift()!
+  const executeCommandImmediately = async (command: string, payload: any) => {
+    // Execute immediately for responsive UI
+    try {
+      switch (command) {
+        case 'play':
+          await executePlayCommand(payload)
+          break
+        case 'pause':
+          await executePauseCommand(payload)
+          break
+        case 'seek':
+          await executeSeekCommand(payload)
+          break
+        case 'next':
+          await executeNextCommand(payload)
+          break
+        case 'previous':
+          await executePreviousCommand(payload)
+          break
+        case 'select':
+          await executeSelectCommand(payload)
+          break
+      }
+    } catch (error) {
+      console.warn(`Immediate command ${command} failed:`, error)
+    }
+  }
+
+  const processConflicts = async () => {
+    if (isProcessingConflictRef.current) return
+    isProcessingConflictRef.current = true
+
+    try {
+      const now = Date.now()
+      const recentCommands = recentCommandsRef.current.filter(cmd => now - cmd.timestamp < conflictWindowMs)
       
-      // Skip old commands (older than 5 seconds)
-      if (Date.now() - timestamp > 5000) continue
-      
-      try {
-        console.log(`Processing global command: ${command} from ${sender}`, payload)
+      if (recentCommands.length > 1) {
+        console.log(`Conflict detected! ${recentCommands.length} commands within ${conflictWindowMs}ms window`)
         
-        // Execute the command locally
-        switch (command) {
-          case 'play':
-            await executePlayCommand(payload)
-            break
-          case 'pause':
-            await executePauseCommand(payload)
-            break
-          case 'seek':
-            await executeSeekCommand(payload)
-            break
-          case 'next':
-            await executeNextCommand(payload)
-            break
-          case 'previous':
-            await executePreviousCommand(payload)
-            break
-          case 'select':
-            await executeSelectCommand(payload)
-            break
-        }
+        // Sort by timestamp (latest first)
+        recentCommands.sort((a, b) => b.timestamp - a.timestamp)
         
-        // Broadcast the executed command to all clients
+        // Get the latest command (winner)
+        const winningCommand = recentCommands[0]
+        console.log(`Winning command: ${winningCommand.command} from ${winningCommand.sender} at ${winningCommand.timestamp}`)
+        
+        // Apply the winning command to resolve conflict
+        await executeCommandImmediately(winningCommand.command, winningCommand.payload)
+        
+        // Broadcast the winning command to all clients
         if (channelRef.current) {
           channelRef.current.send({
             type: 'broadcast',
-            event: 'player:command_executed',
-            payload: { command, payload, sender, timestamp }
+            event: 'player:conflict_resolved',
+            payload: { 
+              command: winningCommand.command, 
+              payload: winningCommand.payload, 
+              sender: winningCommand.sender, 
+              timestamp: winningCommand.timestamp,
+              id: winningCommand.id
+            }
           })
         }
-        
-      } catch (error) {
-        console.warn(`Global command ${command} failed:`, error)
       }
+      
+      // Clean up old commands
+      recentCommandsRef.current = recentCommandsRef.current.filter(cmd => now - cmd.timestamp < conflictWindowMs)
+      
+    } finally {
+      isProcessingConflictRef.current = false
     }
-    
-    isProcessingGlobalQueueRef.current = false
   }
 
-  const enqueueGlobalCommand = (command: string, payload: any) => {
+  const sendCommand = (command: string, payload: any) => {
     const timestamp = Date.now()
-    globalCommandQueueRef.current.push({ command, payload, sender: clientIdRef.current, timestamp })
+    const id = crypto.randomUUID?.() || Math.random().toString(36).slice(2)
     
-    // Broadcast to all clients to add to their queues
+    // Execute immediately for responsive UI
+    executeCommandImmediately(command, payload)
+    
+    // Add to recent commands for conflict detection
+    recentCommandsRef.current.push({ command, payload, sender: clientIdRef.current, timestamp, id })
+    
+    // Broadcast to all clients
     if (channelRef.current) {
       channelRef.current.send({
         type: 'broadcast',
-        event: 'player:command_queued',
-        payload: { command, payload, sender: clientIdRef.current, timestamp }
+        event: 'player:command_sent',
+        payload: { command, payload, sender: clientIdRef.current, timestamp, id }
       })
     }
     
-    // Process queue immediately
-    processGlobalQueue()
+    // Process conflicts after a short delay
+    setTimeout(processConflicts, conflictWindowMs + 100)
   }
 
   // Command execution handlers (same for all clients)
@@ -762,9 +787,9 @@ export default function App(): JSX.Element {
     if (!audio) return
     
     if (audio.paused) {
-      enqueueGlobalCommand('play', { index: Math.max(0, currentIndexRef.current), time: audio.currentTime })
+      sendCommand('play', { index: Math.max(0, currentIndexRef.current), time: audio.currentTime })
     } else {
-      enqueueGlobalCommand('pause', { time: audio.currentTime })
+      sendCommand('pause', { time: audio.currentTime })
     }
   }
 
@@ -840,7 +865,7 @@ export default function App(): JSX.Element {
 
   const onSeek = (value: number) => {
     if (isApplyingRemoteRef.current) return
-    enqueueGlobalCommand('seek', { time: value })
+    sendCommand('seek', { time: value })
   }
 
   const currentTrack = tracks[currentIndex] ?? null
@@ -852,13 +877,13 @@ export default function App(): JSX.Element {
   const goPrevious = () => {
     const hasPrev = currentIndexRef.current > 0
     if (!hasPrev) return
-    enqueueGlobalCommand('previous', {})
+    sendCommand('previous', {})
   }
 
   const goNext = () => {
     const hasN = currentIndexRef.current >= 0 && currentIndexRef.current < tracksRef.current.length - 1
     if (!hasN) return
-    enqueueGlobalCommand('next', {})
+    sendCommand('next', {})
   }
 
   // When metadata loads for a new track, autoplay if flagged
@@ -1274,28 +1299,28 @@ export default function App(): JSX.Element {
         }
     })
 
-    // Handle commands queued by any client
-    ch.on('broadcast', { event: 'player:command_queued' }, ({ payload }) => {
+    // Handle commands sent by any client
+    ch.on('broadcast', { event: 'player:command_sent' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
       
-      const { command, payload: cmdPayload, sender, timestamp } = payload
-      console.log(`Received queued command from ${sender}: ${command}`, cmdPayload)
+      const { command, payload: cmdPayload, sender, timestamp, id } = payload
+      console.log(`Received command from ${sender}: ${command}`, cmdPayload)
       
-      // Add to global queue
-      globalCommandQueueRef.current.push({ command, payload: cmdPayload, sender, timestamp })
+      // Add to recent commands for conflict detection
+      recentCommandsRef.current.push({ command, payload: cmdPayload, sender, timestamp, id })
       
-      // Process queue
-      processGlobalQueue()
+      // Process conflicts after a short delay
+      setTimeout(processConflicts, conflictWindowMs + 100)
     })
 
-    // Handle executed commands from any client
-    ch.on('broadcast', { event: 'player:command_executed' }, ({ payload }) => {
+    // Handle conflict resolution
+    ch.on('broadcast', { event: 'player:conflict_resolved' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
       
-      const { command, payload: cmdPayload } = payload
-      console.log(`Received executed command: ${command}`, cmdPayload)
+      const { command, payload: cmdPayload, sender, timestamp, id } = payload
+      console.log(`Conflict resolved: ${command} from ${sender} wins`, cmdPayload)
       
-      // Apply the command locally (but don't re-broadcast)
+      // Apply the winning command to sync all devices
       isApplyingRemoteRef.current = true
       
       switch (command) {
@@ -2305,8 +2330,8 @@ export default function App(): JSX.Element {
                           <button
                             className={`w-full text-left px-2.5 sm:px-3 py-2 rounded-md transition ${active ? 'bg-black/5 dark:bg-white/10 text-brand-500' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}
                             onClick={() => {
-                              enqueueGlobalCommand('select', { index: idx })
-                              enqueueGlobalCommand('play', { index: idx, time: 0 })
+                              sendCommand('select', { index: idx })
+                              sendCommand('play', { index: idx, time: 0 })
                             }}
                           >
                             <div className="flex items-center gap-2.5 sm:gap-3">
