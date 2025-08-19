@@ -144,6 +144,30 @@ export default function App(): JSX.Element {
   const displayNameRef = useRef<string>('')
   const pendingSelfNameRef = useRef<string | null>(null)
 
+  // Serialized player command queue (ensures play/pause/seek/next/previous run one-by-one)
+  const playerCommandQueueRef = useRef<Array<() => Promise<void>>>([])
+  const isProcessingPlayerCommandRef = useRef<boolean>(false)
+
+  const processNextPlayerCommand = () => {
+    if (isProcessingPlayerCommandRef.current) return
+    const next = playerCommandQueueRef.current.shift()
+    if (!next) return
+    isProcessingPlayerCommandRef.current = true
+    Promise.resolve()
+      .then(() => next())
+      .catch((err) => { console.warn('Player command failed:', err) })
+      .finally(() => {
+        isProcessingPlayerCommandRef.current = false
+        if (playerCommandQueueRef.current.length > 0) processNextPlayerCommand()
+      })
+  }
+
+  const enqueuePlayerCommand = (task: () => Promise<void> | void) => {
+    const wrapped: () => Promise<void> = async () => { await task() }
+    playerCommandQueueRef.current.push(wrapped)
+    processNextPlayerCommand()
+  }
+
   // Toast helpers bound to state
   const addToast = (message: string, type: Toast['type'] = 'info', duration: number = 3000) => {
     const id = crypto.randomUUID?.() || Math.random().toString(36).slice(2)
@@ -625,27 +649,25 @@ export default function App(): JSX.Element {
   }
 
   const togglePlay = async () => {
-    const audio = audioRef.current
-    if (!audio) return
-    
-    // Don't broadcast if we're applying a remote change
-    if (isApplyingRemoteRef.current) return
-    
-    if (audio.paused) {
-      try {
-        // Don't call audio.load() here - it resets the currentTime!
-        await audio.play()
-        setIsPlaying(true)
-        broadcastState('play', { index: Math.max(0, currentIndexRef.current), time: audio.currentTime })
-      } catch (err) {
-        console.warn('Playback error:', err)
-        setError('Unable to play the audio. Please try again.')
+    enqueuePlayerCommand(async () => {
+      const audio = audioRef.current
+      if (!audio) return
+      if (isApplyingRemoteRef.current) return
+      if (audio.paused) {
+        try {
+          await audio.play()
+          setIsPlaying(true)
+          broadcastState('play', { index: Math.max(0, currentIndexRef.current), time: audio.currentTime })
+        } catch (err) {
+          console.warn('Playback error:', err)
+          setError('Unable to play the audio. Please try again.')
+        }
+      } else {
+        audio.pause()
+        setIsPlaying(false)
+        broadcastState('pause', { time: audio.currentTime })
       }
-    } else {
-      audio.pause()
-      setIsPlaying(false)
-      broadcastState('pause', { time: audio.currentTime })
-    }
+    })
   }
 
   const playCurrent = async () => {
@@ -719,16 +741,16 @@ export default function App(): JSX.Element {
   }
 
   const onSeek = (value: number) => {
-    // Don't broadcast if we're applying a remote change
-    if (isApplyingRemoteRef.current) return
-    
-    const audio = audioRef.current
-    if (!audio) return
-    audio.currentTime = value
-    setCurrentTime(value)
-    if (channelRef.current) {
-      channelRef.current.send({ type: 'broadcast', event: 'player:seek', payload: { time: value, sender: clientIdRef.current } })
-    }
+    enqueuePlayerCommand(async () => {
+      if (isApplyingRemoteRef.current) return
+      const audio = audioRef.current
+      if (!audio) return
+      audio.currentTime = value
+      setCurrentTime(value)
+      if (channelRef.current) {
+        channelRef.current.send({ type: 'broadcast', event: 'player:seek', payload: { time: value, sender: clientIdRef.current } })
+      }
+    })
   }
 
   const currentTrack = tracks[currentIndex] ?? null
@@ -738,27 +760,31 @@ export default function App(): JSX.Element {
   const hasNext = currentIndex >= 0 && currentIndex < tracks.length - 1
 
   const goPrevious = () => {
-    const hasPrev = currentIndexRef.current > 0
-    if (!hasPrev) return
-    const nextIndex = Math.max(0, currentIndexRef.current - 1)
-    setCurrentIndex(nextIndex)
-    setCurrentTime(0)
-    shouldAutoplayRef.current = true
-    if (channelRef.current && !isApplyingRemoteRef.current) {
-      channelRef.current.send({ type: 'broadcast', event: 'player:previous', payload: { sender: clientIdRef.current } })
-    }
+    enqueuePlayerCommand(async () => {
+      const hasPrev = currentIndexRef.current > 0
+      if (!hasPrev) return
+      const nextIndex = Math.max(0, currentIndexRef.current - 1)
+      setCurrentIndex(nextIndex)
+      setCurrentTime(0)
+      shouldAutoplayRef.current = true
+      if (channelRef.current && !isApplyingRemoteRef.current) {
+        channelRef.current.send({ type: 'broadcast', event: 'player:previous', payload: { sender: clientIdRef.current } })
+      }
+    })
   }
 
   const goNext = () => {
-    const hasN = currentIndexRef.current >= 0 && currentIndexRef.current < tracksRef.current.length - 1
-    if (!hasN) return
-    const nextIndex = Math.min(tracksRef.current.length - 1, currentIndexRef.current + 1)
-    setCurrentIndex(nextIndex)
-    setCurrentTime(0)
-    shouldAutoplayRef.current = true
-    if (channelRef.current && !isApplyingRemoteRef.current) {
-      channelRef.current.send({ type: 'broadcast', event: 'player:next', payload: { sender: clientIdRef.current } })
-    }
+    enqueuePlayerCommand(async () => {
+      const hasN = currentIndexRef.current >= 0 && currentIndexRef.current < tracksRef.current.length - 1
+      if (!hasN) return
+      const nextIndex = Math.min(tracksRef.current.length - 1, currentIndexRef.current + 1)
+      setCurrentIndex(nextIndex)
+      setCurrentTime(0)
+      shouldAutoplayRef.current = true
+      if (channelRef.current && !isApplyingRemoteRef.current) {
+        channelRef.current.send({ type: 'broadcast', event: 'player:next', payload: { sender: clientIdRef.current } })
+      }
+    })
   }
 
   // When metadata loads for a new track, autoplay if flagged
@@ -1176,31 +1202,25 @@ export default function App(): JSX.Element {
 
     ch.on('broadcast', { event: 'player:play' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
-      const { index, time } = payload as { index: number; time: number }
-      
-      console.log('Received remote play:', { index, time, currentIndex: currentIndexRef.current })
-      
-      // If we don't yet have tracks or the index is out of range, queue it
-      if (tracksRef.current.length === 0 || index >= tracksRef.current.length) {
-        pendingRemotePlayRef.current = { index, time }
-        return
-      }
-      
-      isApplyingRemoteRef.current = true
-      shouldAutoplayRef.current = true
-      
-      // If index changed, update and wait for metadata; else just play current
-      if (currentIndexRef.current !== index) {
-        console.log('Remote play: changing index from', currentIndexRef.current, 'to', index)
-        setCurrentIndex(index)
-        setCurrentTime(time)
-        // Wait for state update and metadata load
-        setTimeout(() => {
+      enqueuePlayerCommand(async () => {
+        const { index, time } = payload as { index: number; time: number }
+        console.log('Received remote play:', { index, time, currentIndex: currentIndexRef.current })
+        if (tracksRef.current.length === 0 || index >= tracksRef.current.length) {
+          pendingRemotePlayRef.current = { index, time }
+          return
+        }
+        isApplyingRemoteRef.current = true
+        shouldAutoplayRef.current = true
+        if (currentIndexRef.current !== index) {
+          console.log('Remote play: changing index from', currentIndexRef.current, 'to', index)
+          setCurrentIndex(index)
+          setCurrentTime(time)
+          await new Promise(r => setTimeout(r, 100))
           const audio = audioRef.current
-          if (audio && audio.readyState >= 2) { // HAVE_CURRENT_DATA or higher
+          if (audio && audio.readyState >= 2) {
             try {
               audio.currentTime = time
-              void audio.play()
+              await audio.play()
               setIsPlaying(true)
             } catch (e) {
               console.log('Remote play failed:', e)
@@ -1209,89 +1229,97 @@ export default function App(): JSX.Element {
             }
           }
           isApplyingRemoteRef.current = false
-        }, 100) // Give more time for state update
-      } else {
-        // Same track, just resume from time
-        const audio = audioRef.current
-        if (audio) {
-          try {
-            audio.currentTime = time
-            void audio.play()
-            setIsPlaying(true)
-          } catch (e) {
-            console.log('Remote play failed:', e)
-            setPlaybackBlocked(true)
-            pendingRemotePlayRef.current = { index, time }
+        } else {
+          const audio = audioRef.current
+          if (audio) {
+            try {
+              audio.currentTime = time
+              await audio.play()
+              setIsPlaying(true)
+            } catch (e) {
+              console.log('Remote play failed:', e)
+              setPlaybackBlocked(true)
+              pendingRemotePlayRef.current = { index, time }
+            }
           }
+          isApplyingRemoteRef.current = false
         }
-        isApplyingRemoteRef.current = false
-      }
+      })
     })
 
     ch.on('broadcast', { event: 'player:pause' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
-      
-      console.log('Received remote pause:', payload)
-      
-      isApplyingRemoteRef.current = true
-      const { time } = payload as { time: number }
-      const audio = audioRef.current
-      if (audio) {
-        audio.pause()
-        audio.currentTime = time
-      }
-      setIsPlaying(false)
-      shouldAutoplayRef.current = false
-      setCurrentTime(time)
-      setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+      enqueuePlayerCommand(async () => {
+        console.log('Received remote pause:', payload)
+        isApplyingRemoteRef.current = true
+        const { time } = payload as { time: number }
+        const audio = audioRef.current
+        if (audio) {
+          audio.pause()
+          audio.currentTime = time
+        }
+        setIsPlaying(false)
+        shouldAutoplayRef.current = false
+        setCurrentTime(time)
+        await Promise.resolve()
+        isApplyingRemoteRef.current = false
+      })
     })
 
     ch.on('broadcast', { event: 'player:seek' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
-      const { time } = payload as { time: number }
-      isApplyingRemoteRef.current = true
-      const audio = audioRef.current
-      if (audio) audio.currentTime = time
-      setCurrentTime(time)
-      setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+      enqueuePlayerCommand(async () => {
+        const { time } = payload as { time: number }
+        isApplyingRemoteRef.current = true
+        const audio = audioRef.current
+        if (audio) audio.currentTime = time
+        setCurrentTime(time)
+        await Promise.resolve()
+        isApplyingRemoteRef.current = false
+      })
     })
 
     ch.on('broadcast', { event: 'player:next' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
-      
-      console.log('Received remote next')
-      
-      isApplyingRemoteRef.current = true
-      const nextIndex = Math.min(tracksRef.current.length - 1, Math.max(0, currentIndexRef.current + 1))
-      console.log('Remote next: changing from', currentIndexRef.current, 'to', nextIndex)
-      setCurrentIndex(nextIndex)
-      setCurrentTime(0)
-      shouldAutoplayRef.current = true
-      setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+      enqueuePlayerCommand(async () => {
+        console.log('Received remote next')
+        isApplyingRemoteRef.current = true
+        const nextIndex = Math.min(tracksRef.current.length - 1, Math.max(0, currentIndexRef.current + 1))
+        console.log('Remote next: changing from', currentIndexRef.current, 'to', nextIndex)
+        setCurrentIndex(nextIndex)
+        setCurrentTime(0)
+        shouldAutoplayRef.current = true
+        await Promise.resolve()
+        isApplyingRemoteRef.current = false
+      })
     })
 
     ch.on('broadcast', { event: 'player:previous' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
-      
-      console.log('Received remote previous')
-      
-      isApplyingRemoteRef.current = true
-      const prevIndex = Math.max(0, Math.min(tracksRef.current.length - 1, currentIndexRef.current - 1))
-      console.log('Remote previous: changing from', currentIndexRef.current, 'to', prevIndex)
-      setCurrentIndex(prevIndex)
-      setCurrentTime(0)
-      shouldAutoplayRef.current = true
-      setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+      enqueuePlayerCommand(async () => {
+        console.log('Received remote previous')
+        isApplyingRemoteRef.current = true
+        const prevIndex = Math.max(0, Math.min(tracksRef.current.length - 1, currentIndexRef.current - 1))
+        console.log('Remote previous: changing from', currentIndexRef.current, 'to', prevIndex)
+        setCurrentIndex(prevIndex)
+        setCurrentTime(0)
+        shouldAutoplayRef.current = true
+        await Promise.resolve()
+        isApplyingRemoteRef.current = false
+      })
     })
 
     ch.on('broadcast', { event: 'player:select' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
-      const { index } = payload as { index: number }
-      isApplyingRemoteRef.current = true
-      setCurrentIndex(index)
-      setCurrentTime(0)
-      shouldAutoplayRef.current = true
-      setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+      enqueuePlayerCommand(async () => {
+        const { index } = payload as { index: number }
+        isApplyingRemoteRef.current = true
+        setCurrentIndex(index)
+        setCurrentTime(0)
+        shouldAutoplayRef.current = true
+        await Promise.resolve()
+        isApplyingRemoteRef.current = false
+      })
     })
 
     ch.on('broadcast', { event: 'room:ended' }, () => {
@@ -2275,17 +2303,19 @@ export default function App(): JSX.Element {
                           <button
                             className={`w-full text-left px-2.5 sm:px-3 py-2 rounded-md transition ${active ? 'bg-black/5 dark:bg-white/10 text-brand-500' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}
                             onClick={() => {
-                              setCurrentIndex(idx)
-                              setCurrentTime(0)
-                              shouldAutoplayRef.current = true
-                              const audio = audioRef.current
-                              if (audio) {
-                                try { audio.currentTime = 0; void audio.play(); setIsPlaying(true) } catch { setPlaybackBlocked(true) }
-                              }
-                              if (channelRef.current) {
-                                channelRef.current.send({ type: 'broadcast', event: 'player:select', payload: { index: idx, sender: clientIdRef.current } })
-                                channelRef.current.send({ type: 'broadcast', event: 'player:play', payload: { index: idx, time: 0, sender: clientIdRef.current } })
-                              }
+                              enqueuePlayerCommand(async () => {
+                                setCurrentIndex(idx)
+                                setCurrentTime(0)
+                                shouldAutoplayRef.current = true
+                                const audio = audioRef.current
+                                if (audio) {
+                                  try { audio.currentTime = 0; await audio.play(); setIsPlaying(true) } catch { setPlaybackBlocked(true) }
+                                }
+                                if (channelRef.current) {
+                                  channelRef.current.send({ type: 'broadcast', event: 'player:select', payload: { index: idx, sender: clientIdRef.current } })
+                                  channelRef.current.send({ type: 'broadcast', event: 'player:play', payload: { index: idx, time: 0, sender: clientIdRef.current } })
+                                }
+                              })
                             }}
                           >
                             <div className="flex items-center gap-2.5 sm:gap-3">
