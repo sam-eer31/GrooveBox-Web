@@ -47,10 +47,22 @@ function formatTime(seconds: number): string {
 }
 
 function cleanFileName(fileName: string): string {
-  return fileName
-    .replace(/[\[\]{}()]/g, '') // Remove brackets and braces
-    .replace(/\s+/g, ' ') // Replace multiple spaces with single space
-    .trim()
+  // Preserve known audio extension, but strip ALL special characters from the base name
+  const trimmed = (fileName || '').trim()
+  const lastDot = trimmed.lastIndexOf('.')
+  const rawName = lastDot > 0 ? trimmed.slice(0, lastDot) : trimmed
+  const rawExt = lastDot > 0 ? trimmed.slice(lastDot + 1).toLowerCase() : ''
+
+  // Remove everything that's not a letter, number, or space from the base name
+  let base = rawName.replace(/[^a-zA-Z0-9 ]+/g, '')
+  base = base.replace(/\s+/g, ' ').trim()
+  if (!base) base = 'track'
+
+  // Keep only a safe, known extension set
+  const allowedExts = new Set(['mp3', 'wav', 'm4a', 'aac'])
+  const ext = allowedExts.has(rawExt) ? rawExt : ''
+
+  return ext ? `${base}.${ext}` : base
 }
 
 function deriveDisplayNameFromObjectName(objectName: string): string {
