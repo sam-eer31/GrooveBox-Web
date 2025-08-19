@@ -567,6 +567,17 @@ export default function App(): JSX.Element {
     loadFromSupabase()
   }, [inRoom, roomCode])
 
+  // If the displayName changes while connected, update presence metadata so others see the new name
+  useEffect(() => {
+    const ch = channelRef.current
+    if (!inRoom || !ch) return
+    const name = (displayName || 'Guest').trim()
+    if (!name) return
+    try {
+      void ch.track({ name })
+    } catch {}
+  }, [displayName, inRoom])
+
   const onDrop: React.DragEventHandler<HTMLDivElement> = (e) => {
     e.preventDefault()
     e.stopPropagation()
@@ -799,17 +810,21 @@ export default function App(): JSX.Element {
     try {
       localStorage.removeItem('groovebox_room')
       localStorage.removeItem('groovebox_is_host')
+      localStorage.removeItem('groovebox_name') // Clear name when ending room
     } catch {}
+    setDisplayName('') // Clear display name when ending room
   }
 
   const leaveRoom = async () => {
     try { localStorage.removeItem('groovebox_room') } catch {}
     try { localStorage.removeItem('groovebox_is_host') } catch {}
+    try { localStorage.removeItem('groovebox_name') } catch {} // Clear name when leaving room
     if (channelRef.current) {
       channelRef.current.unsubscribe()
       channelRef.current = null
     }
     cleanupRoomState()
+    setDisplayName('') // Clear display name when leaving room
   }
 
   // Do not end the room automatically on refresh/navigation.
@@ -874,13 +889,22 @@ export default function App(): JSX.Element {
   const createRoom = async () => {
     setError(null)
     if (!supabase) { setError('Supabase not configured'); return }
-    const name = (createName || displayName).trim()
-    if (!name) { setError('Please enter your name'); return }
+    
+    // Always require a name from the input field, don't fall back to displayName
+    const name = createName.trim()
+    if (!name) { 
+      setError('Please enter your name'); 
+      return 
+    }
+    
     const code = await generateUniqueRoomCode()
+    // Ensure name is set before we subscribe to presence
+    setDisplayName(name)
     setRoomCode(code)
     setIsHost(true)
     setInRoom(true)
     setError(null)
+    
     try {
       localStorage.setItem('groovebox_room', code)
       localStorage.setItem('groovebox_name', name)
@@ -901,17 +925,27 @@ export default function App(): JSX.Element {
     setError(null)
     if (!supabase) { setError('Supabase not configured'); return }
     const code = joinCodeInput.trim().toUpperCase()
-    const name = (joinName || displayName).trim()
-    if (!name) { setError('Please enter your name'); return }
+    
+    // Always require a name from the input field, don't fall back to displayName
+    const name = joinName.trim()
+    if (!name) { 
+      setError('Please enter your name'); 
+      return 
+    }
+    
     if (!code) return
     const validCode = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/.test(code)
     if (!validCode) { setError('Invalid room code'); return }
     const active = await roomIsActive(code)
     if (!active) { setError('Room not found or has ended'); return }
+    
+    // Ensure name is set before we subscribe to presence
+    setDisplayName(name)
     setRoomCode(code)
     setIsHost(false)
     setInRoom(true)
     setError(null)
+    
     try {
       localStorage.setItem('groovebox_room', code)
       localStorage.setItem('groovebox_name', name)
@@ -1232,7 +1266,9 @@ export default function App(): JSX.Element {
       try {
         localStorage.removeItem('groovebox_room')
         localStorage.removeItem('groovebox_is_host')
+        localStorage.removeItem('groovebox_name') // Clear name when room ends
       } catch {}
+      setDisplayName('') // Clear display name when room ends
     })
 
     // Handle state requests from reconnecting users
@@ -1732,7 +1768,12 @@ export default function App(): JSX.Element {
         const savedRoom = localStorage.getItem('groovebox_room') || ''
         const savedName = localStorage.getItem('groovebox_name') || ''
         const savedHost = localStorage.getItem('groovebox_is_host') || '0'
-        if (savedName) setDisplayName(savedName)
+        
+        // Only restore name if it's not empty and valid
+        if (savedName && savedName.trim().length > 0) {
+          setDisplayName(savedName.trim())
+        }
+        
         if (savedRoom && supabase) {
           const active = await roomIsActive(savedRoom)
           if (active) {
@@ -1747,9 +1788,11 @@ export default function App(): JSX.Element {
             try {
               localStorage.removeItem('groovebox_room')
               localStorage.removeItem('groovebox_is_host')
+              localStorage.removeItem('groovebox_name') // Also clear name when room is invalid
             } catch {}
             setInRoom(false)
             setIsHost(false)
+            setDisplayName('') // Clear name when room is invalid
           }
         }
       } catch {}
