@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Music, Sun, Moon, Upload as UploadIcon, Power, LogOut, Play, Pause, SkipBack, SkipForward, Volume2 } from 'lucide-react'
+import { Music, Sun, Moon, Upload as UploadIcon, Power, LogOut, Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Users, Menu, X, Copy, Check } from 'lucide-react'
 import { supabase } from './lib/supabaseClient'
 
 type Track = {
@@ -126,7 +126,28 @@ export default function App(): JSX.Element {
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('groovebox_theme') as 'light' | 'dark') || 'dark')
   const [isUploadOpen, setIsUploadOpen] = useState<boolean>(false)
   const [isProgressOpen, setIsProgressOpen] = useState<boolean>(false)
+  const [isParticipantsOpen, setIsParticipantsOpen] = useState<boolean>(false)
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false)
   const [isRestoringSession, setIsRestoringSession] = useState<boolean>(true)
+  const [previousVolume, setPreviousVolume] = useState<number>(1)
+  const [isCodeCopied, setIsCodeCopied] = useState<boolean>(false)
+  const mobileMenuRef = useRef<HTMLDivElement>(null)
+  
+  // Close participants dropdown and mobile menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Element
+      if (isParticipantsOpen && !target.closest('.participants-dropdown') && !target.closest('button')) {
+        setIsParticipantsOpen(false)
+      }
+      if (isMobileMenuOpen && !target.closest('.mobile-menu-dropdown') && !target.closest('button')) {
+        setIsMobileMenuOpen(false)
+      }
+    }
+    
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [isParticipantsOpen, isMobileMenuOpen])
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -218,6 +239,16 @@ export default function App(): JSX.Element {
     
     // Process queue immediately
     processGlobalQueue()
+  }
+
+  const copyRoomCode = async () => {
+    try {
+      await navigator.clipboard.writeText(roomCode)
+      setIsCodeCopied(true)
+      setTimeout(() => setIsCodeCopied(false), 2000)
+    } catch (error) {
+      console.error('Failed to copy room code:', error)
+    }
   }
 
   // Command execution handlers (same for all clients)
@@ -1933,7 +1964,7 @@ export default function App(): JSX.Element {
           </div>
         </header>
         <main className="flex-1">
-          <section className="container-pro py-10 md:py-14">
+          <section className="px-3 sm:px-6 lg:px-8 py-10 md:py-14 max-w-5xl mx-auto">
             <div className="mb-8 text-center md:text-left">
               <h2 className="text-2xl md:text-3xl font-semibold tracking-tight">Listen together, in sync</h2>
               <p className="mt-2 text-sm text-black/60 dark:text-white/60">Create a room, upload tracks, and share a code. Everyone hears the same thing at the same time.</p>
@@ -2051,6 +2082,18 @@ export default function App(): JSX.Element {
               <h1 className="text-sm sm:text-base md:text-lg font-semibold tracking-tight">GrooveBox</h1>
               <p className="text-[10px] sm:text-[11px] text-black/60 dark:text-white/60 truncate">
                 Room <span className="font-mono px-1 py-0.5 rounded-md bg-black/5 dark:bg-white/10">{roomCode}</span>
+                <button
+                  onClick={copyRoomCode}
+                  className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+                  aria-label="Copy room code"
+                  title="Copy room code"
+                >
+                  {isCodeCopied ? (
+                    <Check className="w-3 h-3 text-green-500" />
+                  ) : (
+                    <Copy className="w-3 h-3 text-black/60 dark:text-white/60" />
+                  )}
+                </button>
                 {isHost && <span className="ml-2 text-brand-500">Host</span>}
                 {roomTitle && <span className="ml-2">· {roomTitle}</span>}
               </p>
@@ -2066,18 +2109,159 @@ export default function App(): JSX.Element {
             className="sr-only"
             onChange={(e) => onFiles(e.currentTarget.files)}
           />
+          {/* Mobile Menu Button */}
+          <div className="relative">
           <button
-            className="btn-primary hidden sm:inline-flex"
-            onClick={() => setIsUploadOpen(true)}
-          >
-            <UploadIcon className="h-4 w-4" /> Upload
+              onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+              className="icon-btn h-8 w-8 sm:h-9 sm:w-9 flex items-center justify-center"
+              aria-label="Toggle menu"
+            >
+              {isMobileMenuOpen ? (
+                <X className="h-5 w-5" />
+              ) : (
+                <Menu className="h-5 w-5" />
+              )}
           </button>
 
-          <div className="ml-2 hidden sm:flex items-center gap-2">
+            {/* Mobile Menu Dropdown */}
+            {isMobileMenuOpen && (
+              <div className="absolute top-full right-0 mt-2 w-64 bg-white dark:bg-black border border-black/10 dark:border-white/10 rounded-lg shadow-soft z-50">
+                <div className="p-4 space-y-3">
+                  {/* Upload Button */}
+                  <button
+                    className="w-full btn-primary justify-center"
+                    onClick={() => {
+                      setIsUploadOpen(true)
+                      setIsMobileMenuOpen(false)
+                    }}
+                  >
+                    <UploadIcon className="h-4 w-4 mr-2" /> Upload Tracks
+                  </button>
+                  
+                  {/* Room Controls */}
             {isHost ? (
-              <button onClick={endRoom} className="btn-outline border-red-500/60 text-red-500 hover:bg-red-500/10">End Room</button>
-            ) : (
-              <button onClick={leaveRoom} className="btn-outline">Leave</button>
+                    <button 
+                      onClick={() => {
+                        endRoom()
+                        setIsMobileMenuOpen(false)
+                      }} 
+                      className="w-full btn-outline border-red-500/60 text-red-500 hover:bg-red-500/10 justify-center"
+                    >
+                      End Room
+                    </button>
+                  ) : (
+          <button
+                      onClick={() => {
+                        leaveRoom()
+                        setIsMobileMenuOpen(false)
+                      }} 
+                      className="w-full btn-outline justify-center"
+                    >
+                      Leave Room
+          </button>
+                  )}
+        </div>
+            </div>
+          )}
+          </div>
+          
+          {/* Participants Button */}
+          <div className="relative">
+          <button
+              onClick={() => setIsParticipantsOpen(!isParticipantsOpen)}
+              className="icon-btn h-8 w-8 sm:h-9 sm:w-9 relative"
+              aria-label="View participants"
+              title={`${participants.length + 1} participants`}
+            >
+              <Users className="h-4 w-4" />
+              {participants.length > 0 && (
+                <span className="absolute -top-1 -right-1 w-4 h-4 bg-brand-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+                  {participants.length + 1}
+                </span>
+              )}
+          </button>
+            
+            {/* Participants Dropdown */}
+            {isParticipantsOpen && (
+              <div className="participants-dropdown absolute top-full right-0 mt-2 w-80 bg-white dark:bg-black border border-black/10 dark:border-white/10 rounded-lg shadow-soft z-50">
+                <div className="p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-semibold">Participants ({participants.length + 1})</h3>
+                    <button
+                      onClick={() => setIsParticipantsOpen(false)}
+                      className="text-black/60 dark:text-white/60 hover:text-black dark:hover:text-white"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+            </div>
+            
+            {/* Current User (You) */}
+            <div className="mb-3">
+              <div className="flex items-center gap-3 p-3 rounded-lg bg-gradient-to-r from-brand-500/10 to-brand-500/5 border border-brand-500/20">
+                <div className="relative">
+                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center text-white font-semibold text-sm">
+                    {(displayName || 'Guest').charAt(0).toUpperCase()}
+                  </div>
+                  {isHost && (
+                          <div className="absolute -top-1 -right-1 w-4 h-4 bg-yellow-500 rounded-full flex items-center justify-center shadow-sm">
+                            <svg className="w-2.5 h-2.5 text-black" fill="currentColor" viewBox="0 0 24 24">
+                              <path d="M12 8L15 13.2L18 10.5L17.3 14H6.7L6 10.5L9 13.2L12 8M12 4L8.5 10L3 5L5 16H19L21 5L15.5 10L12 4Z"/>
+                            </svg>
+                    </div>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-black dark:text-white truncate">{displayName || 'Guest'}</span>
+                    {isHost && (
+                            <span className="px-1.5 py-0.5 bg-yellow-500/20 text-yellow-700 dark:text-yellow-400 text-[9px] font-medium rounded-full border border-yellow-500/30">
+                        HOST
+                      </span>
+                    )}
+                  </div>
+                        <p className="text-[10px] text-black/50 dark:text-white/50">You</p>
+                </div>
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+              </div>
+            </div>
+
+            {/* Other Participants */}
+                  {participants.length > 0 ? (
+                    <div className="space-y-2 max-h-48 overflow-y-auto">
+                {participants.map((p, i) => (
+                        <div key={p.key + i} className="flex items-center gap-3 p-3 rounded-lg bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/20">
+                          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-gray-400 to-gray-600 flex items-center justify-center text-white font-semibold text-sm">
+                      {p.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-black dark:text-white truncate">{p.name}</span>
+                        {p.isHost && (
+                                <span className="px-1.5 py-0.5 bg-yellow-500/20 text-yellow-700 dark:text-yellow-400 text-[9px] font-medium rounded-full border border-yellow-500/30">
+                            HOST
+                          </span>
+                        )}
+                      </div>
+                            <p className="text-[10px] text-black/50 dark:text-white/50">Connected</p>
+                    </div>
+                    <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                  </div>
+                ))}
+              </div>
+                  ) : (
+                    <div className="text-center py-4 text-black/40 dark:text-white/40">
+                      <div className="w-8 h-8 mx-auto mb-2 rounded-full bg-black/10 dark:bg-white/10 flex items-center justify-center">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                  </svg>
+                </div>
+                      <p className="text-xs">You're the only one here</p>
+              </div>
+            )}
+          </div>
+              </div>
             )}
           </div>
           <button
@@ -2092,7 +2276,7 @@ export default function App(): JSX.Element {
       </header>
 
       <main className="flex-1">
-        <div className="container-pro py-4 sm:py-6">
+        <div className="container-pro py-4 sm:py-6" style={{maxWidth: '1920px'}}>
           {playbackBlocked && (
             <div className="mb-4 rounded-md border border-yellow-500/40 bg-yellow-400/10 text-yellow-200 px-3 py-2 text-sm flex items-center justify-between">
               <span>Playback is blocked by your browser. Click to enable synced playback.</span>
@@ -2100,132 +2284,241 @@ export default function App(): JSX.Element {
             </div>
           )}
 
-          <div className="mb-4 flex items-center justify-between text-xs">
-            <div className="text-black/60 dark:text-white/60">You: <span className="font-medium text-black dark:text-white">{displayName || 'Guest'}</span></div>
-            <div className="text-black/60 dark:text-white/60">Participants: <span className="font-medium text-black dark:text-white">{participants.length + 1}</span></div>
-          </div>
-          
-          {/* Professional Participants List */}
-          <div className="mb-6">
-            <h3 className="text-xs uppercase tracking-wide text-black/60 dark:text-white/60 mb-3">Connected Users</h3>
-            
-            {/* Current User (You) */}
-            <div className="mb-3">
-              <div className="flex items-center gap-3 p-3 rounded-lg bg-gradient-to-r from-brand-500/10 to-brand-500/5 border border-brand-500/20">
-                <div className="relative">
-                  <div className="w-10 h-10 rounded-full bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center text-white font-semibold text-sm">
-                    {(displayName || 'Guest').charAt(0).toUpperCase()}
-                  </div>
-                  {isHost && (
-                    <div className="absolute -top-1 -right-1 w-5 h-5 bg-yellow-500 rounded-full flex items-center justify-center">
-                      <span className="text-[10px] font-bold text-black">👑</span>
-                    </div>
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-black dark:text-white truncate">{displayName || 'Guest'}</span>
-                    {isHost && (
-                      <span className="px-2 py-0.5 bg-yellow-500/20 text-yellow-700 dark:text-yellow-400 text-[10px] font-medium rounded-full border border-yellow-500/30">
-                        HOST
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-[11px] text-black/50 dark:text-white/50">You</p>
-                </div>
-                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-              </div>
-            </div>
 
-            {/* Other Participants */}
-            {participants.length > 0 && (
-              <div className="space-y-2">
-                {participants.map((p, i) => (
-                  <div key={p.key + i} className="flex items-center gap-3 p-3 rounded-lg bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/20 hover:bg-black/10 dark:hover:bg-white/15 transition-colors">
-                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-gray-400 to-gray-600 flex items-center justify-center text-white font-semibold text-sm">
-                      {p.name.charAt(0).toUpperCase()}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-black dark:text-white truncate">{p.name}</span>
-                        {p.isHost && (
-                          <span className="px-2 py-0.5 bg-yellow-500/20 text-yellow-700 dark:text-yellow-400 text-[10px] font-medium rounded-full border border-yellow-500/30">
-                            HOST
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-black/50 dark:text-white/50">Connected</p>
-                    </div>
-                    <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Empty State */}
-            {participants.length === 0 && (
-              <div className="text-center py-6 text-black/40 dark:text-white/40">
-                <div className="w-12 h-12 mx-auto mb-2 rounded-full bg-black/10 dark:bg-white/10 flex items-center justify-center">
-                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-                  </svg>
-                </div>
-                <p className="text-sm">You're the only one here</p>
-                <p className="text-xs mt-1">Share the room code to invite others</p>
-              </div>
-            )}
-          </div>
           {/* Legacy single-toast placeholder removed; using stacked toasts now */}
           {error && inRoom && <div className="hidden"></div>}
 
-          <div className="grid lg:grid-cols-3 gap-4 sm:gap-6">
-            <div className="lg:col-span-2 min-w-0">
-              {/* Upload area moved to modal */}
-
-              <div className="mt-4 sm:mt-6 card p-3 sm:p-6 md:p-7 shadow-soft">
-                <div className="flex flex-col sm:flex-row items-center gap-2.5 sm:gap-5">
-                  <div className="h-10 w-10 sm:h-16 sm:w-16 md:h-20 md:w-20 rounded-lg bg-gradient-to-br from-brand-500/30 to-white/10 grid place-items-center ring-1 ring-white/10 shrink-0">
-                    <Music className="h-5 w-5 sm:h-7 sm:w-7 text-brand-500" />
+          {/* Professional Layout - Aligned with Header */}
+          <div className="flex flex-col lg:flex-row gap-4 lg:gap-6 justify-center items-center">
+            {/* Premium Professional Playlist - Below Player on Small Screens, Left on Large */}
+            <div className="w-full max-w-lg order-2 lg:order-1 lg:w-auto lg:flex-1">
+              <div className="mt-4 sm:mt-6 bg-gradient-to-br from-white/95 via-white/90 to-white/85 dark:from-black/95 dark:via-black/90 dark:to-black/85 backdrop-blur-xl border border-white/40 dark:border-white/20 rounded-3xl shadow-2xl">
+                {/* Premium Playlist Header */}
+                <div className="bg-gradient-to-r from-brand-500/10 via-brand-500/5 to-transparent border-b border-white/20 dark:border-white/10 p-8">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                      <div className="w-16 h-16 bg-gradient-to-br from-brand-500 to-brand-600 rounded-2xl flex items-center justify-center shadow-lg">
+                        <Music className="w-8 h-8 text-white" />
+                      </div>
+                      <div>
+                        <h3 className="text-3xl font-bold text-black dark:text-white mb-1">Playlist</h3>
+                        <p className="text-base text-black/70 dark:text-white/70">Your music collection</p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-2xl font-bold text-brand-600 dark:text-brand-400 mb-1">
+                        {isLoadingLibrary ? '...' : tracks.length}
+                      </div>
+                      <div className="text-sm text-black/60 dark:text-white/60 font-medium">
+                        {isLoadingLibrary ? 'Loading' : tracks.length === 1 ? 'track' : 'tracks'}
+                      </div>
+                    </div>
                   </div>
-                  <div className="min-w-0 flex-1 w-full">
-                    <p className="hidden sm:block text-[11px] uppercase tracking-wide text-black/60 dark:text-white/60">Now Playing</p>
+                </div>
+                
+                {/* Premium Playlist Content */}
+                <div className="p-6 min-h-[300px] pb-8">
+                  {isLoadingLibrary ? (
+                    // Premium Loading State
+                    <div className="space-y-4">
+                      {[...Array(8)].map((_, i) => (
+                        <div key={i} className="flex items-center gap-4 p-5 rounded-2xl bg-gradient-to-r from-black/5 to-black/3 dark:from-white/5 dark:to-white/3 animate-pulse">
+                          <div className="w-12 h-12 bg-gradient-to-br from-black/10 to-black/5 dark:from-white/10 dark:to-white/5 rounded-xl"></div>
+                          <div className="flex-1 space-y-2">
+                            <div className="h-4 bg-gradient-to-r from-black/10 to-black/5 dark:from-white/10 dark:to-white/5 rounded w-3/4"></div>
+                            <div className="h-4 bg-gradient-to-r from-black/10 to-black/5 dark:from-white/10 dark:to-white/5 rounded w-1/2"></div>
+                  </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : tracks.length === 0 ? (
+                    // Premium Empty State
+                    <div className="text-center py-12 min-h-[200px] flex flex-col justify-center">
+                      <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-brand-500/20 to-brand-500/10 flex items-center justify-center">
+                        <Music className="w-8 h-8 text-brand-500" />
+                      </div>
+                      <h4 className="text-lg font-semibold text-black dark:text-white mb-2">Your playlist is empty</h4>
+                      <p className="text-black/60 dark:text-white/60 mb-4">Start building your music collection</p>
+                      <div className="inline-flex items-center gap-2 px-4 py-2 bg-brand-500/10 dark:bg-brand-500/10 border border-brand-500/20 dark:border-brand-500/20 rounded-lg text-brand-600 dark:text-brand-400 text-sm font-medium">
+                        <UploadIcon className="w-4 h-4" />
+                        Upload your first track
+                      </div>
+                    </div>
+                  ) : (
+                    // Premium Track List
+                    <div className="space-y-3 max-h-[700px] overflow-y-auto px-2 py-2">
+                      {tracks.length === 1 && (
+                        <div className="text-center py-4 mb-4">
+                          <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-brand-500/10 dark:bg-brand-500/10 border border-brand-500/20 dark:border-brand-500/20 rounded-full text-brand-600 dark:text-brand-400 text-xs font-medium">
+                            <Music className="w-3 h-3" />
+                            Single Track
+                          </div>
+                        </div>
+                      )}
+                      {tracks.map((t, idx) => {
+                        const active = idx === currentIndex
+                        return (
+                          <div
+                            key={t.id}
+                            className={`group relative overflow-hidden rounded-2xl transition-all duration-300 ${
+                              active 
+                                ? 'bg-gradient-to-r from-brand-500/20 via-brand-500/15 to-brand-500/10 shadow-lg ring-2 ring-brand-500/30' 
+                                : 'hover:bg-gradient-to-r hover:from-black/8 hover:via-black/5 hover:to-black/3 dark:hover:from-white/8 dark:hover:via-white/5 dark:hover:to-white/3'
+                            }`}
+                          >
+                            <button
+                              className="w-full text-left p-5 transition-all duration-300"
+                              onClick={() => {
+                                enqueueGlobalCommand('select', { index: idx })
+                                enqueueGlobalCommand('play', { index: idx, time: 0 })
+                              }}
+                            >
+                              <div className="flex items-center gap-4">
+                                {/* Premium Track Number */}
+                                <div className={`relative w-12 h-12 rounded-xl flex items-center justify-center text-sm font-bold transition-all duration-300 ${
+                                  active 
+                                    ? 'bg-brand-500 text-white shadow-lg' 
+                                    : 'bg-gradient-to-br from-black/10 to-black/5 dark:from-white/10 dark:to-white/5 text-black/70 dark:text-white/70 group-hover:bg-black/20 dark:group-hover:bg-white/20'
+                                }`}>
+                                  {active && isPlaying && (
+                                    <div className="absolute inset-0 flex items-center justify-center">
+                                      <div className="flex items-center gap-1">
+                                        <div className="w-1.5 h-1.5 bg-white rounded-full animate-pulse"></div>
+                                        <div className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" style={{animationDelay: '0.2s'}}></div>
+                                        <div className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" style={{animationDelay: '0.4s'}}></div>
+                                      </div>
+                                    </div>
+                                  )}
+                                  {!active || !isPlaying ? idx + 1 : ''}
+                                </div>
+                                
+                                {/* Premium Track Info */}
+                                <div className="flex-1 min-w-0">
+                                  <div className="font-semibold text-black dark:text-white truncate text-base mb-1">
+                                    {t.name}
+                                  </div>
+                                  {active && (
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-xs font-medium text-brand-600 dark:text-brand-400 bg-brand-500/20 dark:bg-brand-500/20 px-2 py-1 rounded-full">
+                                        {isPlaying ? 'Now Playing' : 'Paused'}
+                                      </span>
+                                    </div>
+                                  )}
+                                </div>
+                                
+                                {/* Premium Play Button for Non-Active Tracks */}
+                                {!active && (
+                                  <div className="opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                                    <div className="w-8 h-8 bg-brand-500/20 dark:bg-brand-500/20 rounded-full flex items-center justify-center">
+                                      <Play className="w-4 h-4 text-brand-600 dark:text-brand-400" />
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Player Controls - Above Playlist on Small Screens, Right on Large */}
+            <div className="w-full max-w-lg order-1 lg:order-2 lg:w-auto lg:flex-1 flex justify-center items-start">
+              {/* Professional Player Control Card - Spotify Style (Tall & Narrow) */}
+              <div className="relative mt-4 sm:mt-6 bg-gradient-to-br from-white/80 to-white/40 dark:from-black/80 dark:to-black/40 backdrop-blur-sm border border-white/20 dark:border-white/10 rounded-2xl p-6 sm:p-8 lg:p-10 shadow-soft w-full max-w-lg">
+                {/* Player Header - Centered Music Icon */}
+                <div className="text-center mb-8">
+                  <div className="inline-flex items-center justify-center mb-4">
+                    <div className="h-20 w-20 sm:h-24 sm:w-24 lg:h-28 lg:w-28 rounded-2xl bg-gradient-to-br from-brand-500/20 to-brand-500/10 grid place-items-center ring-1 ring-brand-500/20 shadow-soft">
+                      <Music className="h-10 w-10 sm:h-12 sm:w-12 lg:h-14 lg:w-14 text-brand-500" />
+                    </div>
+                  </div>
+                  
+                  <div className="mb-4">
+                    <p className="text-xs uppercase tracking-wider text-black/60 dark:text-white/60 font-medium mb-2">Now Playing</p>
                     {isLoadingLibrary ? (
-                      <div className="mt-1">
-                        <div className="h-4 sm:h-5 md:h-6 bg-black/10 dark:bg-white/10 rounded animate-pulse mb-2"></div>
-                        <div className="h-3 sm:h-4 md:h-5 bg-black/10 dark:bg-white/10 rounded animate-pulse w-3/4"></div>
+                      <div className="space-y-2">
+                        <div className="h-6 sm:h-7 lg:h-8 bg-black/10 dark:bg-white/10 rounded animate-pulse mx-auto w-3/4"></div>
+                        <div className="h-4 sm:h-5 lg:h-6 bg-black/10 dark:bg-white/10 rounded animate-pulse mx-auto w-1/2"></div>
                       </div>
                     ) : (
-                      <h2 className="mt-1 text-[13px] sm:text-base md:text-lg font-semibold truncate text-center sm:text-left" title={fileName}>{fileName}</h2>
+                      <h2 className="text-lg sm:text-xl lg:text-2xl font-bold text-black dark:text-white px-4" title={fileName}>{fileName}</h2>
                     )}
-                    <div className="mt-2 flex items-center justify-center gap-1.5 sm:gap-3 flex-wrap">
+                  </div>
+                </div>
+
+                {/* Main Controls */}
+                <div className="flex flex-col items-center gap-6">
+                  {/* Progress Bar - Moved above controls */}
+                  <div className="w-full max-w-lg">
+                    <input
+                      type="range"
+                      min={0}
+                      max={duration || 0}
+                      step={0.1}
+                      value={currentTime}
+                      onChange={(e) => onSeek(Number(e.currentTarget.value))}
+                      className="w-full accent-brand-500 touch-pan-x h-3 rounded-full bg-black/10 dark:bg-white/10"
+                      disabled={!currentTrack || isLoadingLibrary}
+                    />
+                    <div className="mt-3 flex justify-between text-sm text-black/70 dark:text-white/70 font-medium">
+                      <span>{formatTime(currentTime)}</span>
+                      <span>{formatTime(duration)}</span>
+                    </div>
+                  </div>
+
+                  {/* Playback Controls */}
+                  <div className="flex items-center justify-center gap-4 sm:gap-6">
                       <button
                         onClick={goPrevious}
                         disabled={!hasPrevious || isLoadingLibrary}
-                        className="icon-btn h-8 w-8 sm:h-10 sm:w-10 rounded-full"
+                      className="icon-btn h-12 w-12 sm:h-14 sm:w-14 lg:h-16 lg:w-16 rounded-full bg-white/50 dark:bg-black/50 backdrop-blur-sm border border-white/20 dark:border-white/10 hover:bg-white/70 dark:hover:bg-black/70 transition-all duration-200 disabled:opacity-50"
                         aria-label="Previous"
                       >
-                        <SkipBack className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+                      <SkipBack className="h-5 w-5 sm:h-6 sm:w-6" />
                       </button>
                       <button
                         onClick={togglePlay}
                         disabled={!currentTrack || isLoadingLibrary}
-                        className="inline-flex items-center justify-center h-9 w-9 sm:h-12 sm:w-12 rounded-full bg-brand-500 text-black hover:brightness-110 disabled:opacity-50"
+                        className="inline-flex items-center justify-center h-10 w-10 sm:h-12 sm:w-12 lg:h-14 lg:w-14 rounded-full bg-gradient-to-br from-brand-500 to-brand-600 text-white hover:from-brand-400 hover:to-brand-500 shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-200 disabled:opacity-50 disabled:hover:scale-100"
                         aria-label={isPlaying ? 'Pause' : 'Play'}
                       >
-                        {isPlaying ? <Pause className="h-5 w-5 sm:h-6 sm:w-6" /> : <Play className="h-5 w-5 sm:h-6 sm:w-6" />}
+                        {isPlaying ? <Pause className="h-4 w-4 sm:h-5 sm:w-5 lg:h-6 lg:w-6" /> : <Play className="h-4 w-4 sm:h-5 sm:w-5 lg:h-6 lg:w-6 ml-1" />}
                       </button>
                       <button
                         onClick={goNext}
                         disabled={!hasNext || isLoadingLibrary}
-                        className="icon-btn h-8 w-8 sm:h-10 sm:w-10 rounded-full"
+                      className="icon-btn h-12 w-12 sm:h-14 sm:w-14 lg:h-16 lg:w-16 rounded-full bg-white/50 dark:bg-black/50 backdrop-blur-sm border border-white/20 dark:border-white/10 hover:bg-white/70 dark:hover:bg-black/70 transition-all duration-200 disabled:opacity-50"
                         aria-label="Next"
                       >
-                        <SkipForward className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+                      <SkipForward className="h-5 w-5 sm:h-6 sm:w-6" />
                       </button>
                     </div>
                   </div>
-                  <div className="hidden md:flex items-center gap-2 w-44 shrink-0">
+
+                {/* Volume Control - Bottom Left Corner */}
+                <div className="hidden lg:flex items-center gap-3 absolute bottom-4 left-6">
+                  <button
+                    onClick={() => {
+                      if (volume > 0) {
+                        setPreviousVolume(volume)
+                        setVolume(0)
+                      } else {
+                        setVolume(previousVolume)
+                      }
+                    }}
+                    className="hover:opacity-80 transition-opacity"
+                    aria-label={volume > 0 ? "Mute" : "Unmute"}
+                  >
+                    {volume > 0 ? (
                     <Volume2 className="h-4 w-4 text-black/60 dark:text-white/60" />
+                    ) : (
+                      <VolumeX className="h-4 w-4 text-black/60 dark:text-white/60" />
+                    )}
+                  </button>
                     <input
                       type="range"
                       min={0}
@@ -2233,27 +2526,41 @@ export default function App(): JSX.Element {
                       step={0.01}
                       value={volume}
                       onChange={(e) => setVolume(Number(e.currentTarget.value))}
-                      className="w-full accent-brand-500"
+                    className="w-32 accent-brand-500"
                     />
                   </div>
-                </div>
-                <div className="mt-3">
+
+                {/* Mobile/Tablet Volume Control */}
+                <div className="lg:hidden mt-8 flex items-center justify-center gap-3">
+                  <button
+                    onClick={() => {
+                      if (volume > 0) {
+                        setPreviousVolume(volume)
+                        setVolume(0)
+                      } else {
+                        setVolume(previousVolume)
+                      }
+                    }}
+                    className="hover:opacity-80 transition-opacity"
+                    aria-label={volume > 0 ? "Mute" : "Unmute"}
+                  >
+                    {volume > 0 ? (
+                      <Volume2 className="h-4 w-4 text-black/60 dark:text-white/60" />
+                    ) : (
+                      <VolumeX className="h-4 w-4 text-black/60 dark:text-white/60" />
+                    )}
+                  </button>
                   <input
                     type="range"
                     min={0}
-                    max={duration || 0}
-                    step={0.1}
-                    value={currentTime}
-                    onChange={(e) => onSeek(Number(e.currentTarget.value))}
-                    className="w-full accent-brand-500 touch-pan-x h-2"
-                    disabled={!currentTrack || isLoadingLibrary}
+                    max={1}
+                    step={0.01}
+                    value={volume}
+                    onChange={(e) => setVolume(Number(e.currentTarget.value))}
+                    className="w-32 accent-brand-500"
                   />
-                  <div className="mt-1 flex justify-between text-[10px] text-black/60 dark:text-white/60">
-                    <span>{formatTime(currentTime)}</span>
-                    <span>{formatTime(duration)}</span>
-                  </div>
-                  {/* Hide mobile volume; device buttons control volume on mobile like Spotify */}
                 </div>
+
 
                 <audio
                   ref={audioRef}
@@ -2275,69 +2582,7 @@ export default function App(): JSX.Element {
               </div>
             </div>
 
-            <div className="min-w-0">
-              <div className="panel p-4 sm:p-5">
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-xs uppercase tracking-wide text-black/60 dark:text-white/60">Playlist</h3>
-                  <span className="text-[11px] text-black/60 dark:text-white/60">
-                    {isLoadingLibrary ? 'Loading...' : `${tracks.length} ${tracks.length === 1 ? 'track' : 'tracks'}`}
-                  </span>
-                </div>
-                
-                {isLoadingLibrary ? (
-                  // Loading state for playlist
-                  <div className="space-y-2">
-                    {[...Array(5)].map((_, i) => (
-                      <div key={i} className="flex items-center gap-2.5 sm:gap-3 px-2.5 sm:px-3 py-2">
-                        <div className="w-6 h-3 bg-black/10 dark:bg-white/10 rounded animate-pulse"></div>
-                        <div className="flex-1 h-4 bg-black/10 dark:bg-white/10 rounded animate-pulse"></div>
-                      </div>
-                    ))}
-                  </div>
-                ) : tracks.length === 0 ? (
-                  <p className="text-sm text-black/60 dark:text-white/60">No songs yet. Upload MP3 or WAV files to get started.</p>
-                ) : (
-                  <ul className="divide-y divide-black/10 dark:divide-white/10 max-h-96 overflow-y-auto">
-                    {tracks.map((t, idx) => {
-                      const active = idx === currentIndex
-                      return (
-                        <li key={t.id}>
-                          <button
-                            className={`w-full text-left px-2.5 sm:px-3 py-2 rounded-md transition ${active ? 'bg-black/5 dark:bg-white/10 text-brand-500' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}
-                            onClick={() => {
-                              enqueueGlobalCommand('select', { index: idx })
-                              enqueueGlobalCommand('play', { index: idx, time: 0 })
-                            }}
-                          >
-                            <div className="flex items-center gap-2.5 sm:gap-3">
-                              <span className="text-[10px] sm:text-[11px] w-6 text-black/60 dark:text-white/60">{idx + 1}</span>
-                              <span className="truncate" title={t.name}>{t.name}</span>
-                              {active && isPlaying && <span aria-hidden className="ml-auto text-xs">▶</span>}
-                            </div>
-                          </button>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                )}
-              </div>
 
-              <div className="mt-4 sm:hidden">
-                <button
-                  className="btn-primary w-full text-center"
-                  onClick={() => setIsUploadOpen(true)}
-                >
-                  <UploadIcon className="h-4 w-4 mr-2" /> Upload
-                </button>
-                <div className="mt-2 flex gap-2">
-                  {isHost ? (
-                    <button onClick={endRoom} className="btn-outline border-red-500/60 text-red-500 hover:bg-red-500/10 w-full">End Room</button>
-                  ) : (
-                    <button onClick={leaveRoom} className="btn-outline w-full">Leave</button>
-                  )}
-                </div>
-              </div>
-            </div>
           </div>
         </div>
       </main>
@@ -2354,7 +2599,7 @@ export default function App(): JSX.Element {
               key={t.id}
               className={`rounded-md px-3 py-2 text-sm shadow-soft border 
                 ${t.type === 'success' ? 'bg-green-600/10 border-green-600/30 text-green-200' : ''}
-                ${t.type === 'info' ? 'bg-blue-600/10 border-blue-600/30 text-blue-200' : ''}
+                ${t.type === 'info' ? 'bg-brand-500/10 border-brand-500/30 text-brand-500' : ''}
                 ${t.type === 'warning' ? 'bg-yellow-600/10 border-yellow-600/30 text-yellow-200' : ''}
                 ${t.type === 'error' ? 'bg-red-600/10 border-red-600/30 text-red-200' : ''}
               `}

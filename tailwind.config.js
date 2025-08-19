@@ -27,7 +27,7 @@ export default {
       colors: {
         // Grok-inspired aqua accent
         brand: {
-          500: "#20E3FF"
+          500: "#03A9F4"
         }
       },
       boxShadow: {
