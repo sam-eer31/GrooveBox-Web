@@ -129,6 +129,7 @@ export default function App(): JSX.Element {
   const uploadedPathsRef = useRef<string[]>([])
   const clientIdToNameRef = useRef<Map<string, string>>(new Map())
   const displayNameRef = useRef<string>('')
+  const pendingSelfNameRef = useRef<string | null>(null)
 
   // Toast helpers bound to state
   const addToast = (message: string, type: Toast['type'] = 'info', duration: number = 3000) => {
@@ -906,6 +907,7 @@ export default function App(): JSX.Element {
     const code = await generateUniqueRoomCode()
     // Ensure name is set before we subscribe to presence
     setDisplayName(name)
+    pendingSelfNameRef.current = name
     setRoomCode(code)
     setIsHost(true)
     setInRoom(true)
@@ -947,6 +949,7 @@ export default function App(): JSX.Element {
     
     // Ensure name is set before we subscribe to presence
     setDisplayName(name)
+    pendingSelfNameRef.current = name
     setRoomCode(code)
     setIsHost(false)
     setInRoom(true)
@@ -1410,7 +1413,9 @@ export default function App(): JSX.Element {
     ch.subscribe(async (status) => {
       if (status === 'SUBSCRIBED') {
         // Track self presence with name
-        await ch.track({ name: displayNameRef.current || 'Guest' })
+        const initialName = (pendingSelfNameRef.current || displayNameRef.current || 'Guest').trim()
+        await ch.track({ name: initialName })
+        pendingSelfNameRef.current = null
         
         // If we're not the host, immediately request current state
         if (!isHost) {
