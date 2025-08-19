@@ -119,7 +119,8 @@ export default function App(): JSX.Element {
   const [joinName, setJoinName] = useState<string>('')
   const [roomTitle, setRoomTitle] = useState<string>('')
   const [roomTitleInput, setRoomTitleInput] = useState<string>('')
-  const [participants, setParticipants] = useState<Array<{ key: string; name: string }>>([])
+  const [homeTab, setHomeTab] = useState<'create' | 'join'>('create')
+  const [participants, setParticipants] = useState<Array<{ key: string; name: string; isHost?: boolean }>>([])
   const [toasts, setToasts] = useState<Toast[]>([])
   const [playbackBlocked, setPlaybackBlocked] = useState<boolean>(false)
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('groovebox_theme') as 'light' | 'dark') || 'dark')
@@ -592,10 +593,19 @@ export default function App(): JSX.Element {
     const name = (displayName || 'Guest').trim()
     if (!name) return
     try {
-      void ch.track({ name })
+      void ch.track({ name, isHost })
     } catch {}
     try { localStorage.setItem('groovebox_name', name) } catch {}
   }, [displayName, inRoom])
+
+  // If host status changes while connected, update presence metadata so everyone sees the correct host
+  useEffect(() => {
+    const ch = channelRef.current
+    if (!inRoom || !ch) return
+    try {
+      void ch.track({ name: displayNameRef.current || 'Guest', isHost })
+    } catch {}
+  }, [isHost, inRoom])
 
   const onDrop: React.DragEventHandler<HTMLDivElement> = (e) => {
     e.preventDefault()
@@ -1064,20 +1074,22 @@ export default function App(): JSX.Element {
 
     // Presence: track participants
     ch.on('presence', { event: 'sync' }, () => {
-      const state = ch.presenceState() as Record<string, Array<{ name?: string }>>
-      const entries: Array<{ key: string; name: string }> = []
+      const state = ch.presenceState() as Record<string, Array<{ name?: string; isHost?: boolean }>>
+      const entries: Array<{ key: string; name: string; isHost?: boolean }> = []
       Object.entries(state).forEach(([key, metas]) => {
         if (key === clientIdRef.current) return // exclude self from others list
-        metas.forEach(meta => {
-          const name = meta?.name || 'Guest'
-          clientIdToNameRef.current.set(key, name)
-          entries.push({ key, name })
-        })
+        if (!metas || metas.length === 0) return
+        const lastMeta = metas[metas.length - 1] || {}
+        const name = (lastMeta?.name as string) || 'Guest'
+        const isHostMeta = !!lastMeta?.isHost
+        clientIdToNameRef.current.set(key, name)
+        entries.push({ key, name, isHost: isHostMeta })
       })
       setParticipants(entries)
     })
           ch.on('presence', { event: 'join' }, ({ key, newPresences }) => {
-        const name = newPresences?.[0]?.name || clientIdToNameRef.current.get(key) || 'Guest'
+        const latest = newPresences?.[newPresences.length - 1]
+        const name = latest?.name || clientIdToNameRef.current.get(key) || 'Guest'
         clientIdToNameRef.current.set(key, name)
         addToast(`${name} joined the room`, 'success')
         
@@ -1426,7 +1438,7 @@ export default function App(): JSX.Element {
       if (status === 'SUBSCRIBED') {
         // Track self presence with name
         const initialName = (pendingSelfNameRef.current || displayNameRef.current || 'Guest').trim()
-        await ch.track({ name: initialName })
+        await ch.track({ name: initialName, isHost })
         pendingSelfNameRef.current = null
         
         // If we're not the host, immediately request current state
@@ -1896,18 +1908,78 @@ export default function App(): JSX.Element {
               <h2 className="text-2xl md:text-3xl font-semibold tracking-tight">Listen together, in sync</h2>
               <p className="mt-2 text-sm text-black/60 dark:text-white/60">Create a room, upload tracks, and share a code. Everyone hears the same thing at the same time.</p>
             </div>
-            <div className="grid md:grid-cols-2 gap-6">
+            {/* Small screens: single card with tabs */}
+            <div className="md:hidden">
+              <div className="panel p-0 overflow-hidden">
+                <div className="flex border-b border-black/10 dark:border-white/10">
+                  <button
+                    className={`flex-1 py-3 text-sm font-medium ${homeTab==='create' ? 'text-brand-500 border-b-2 border-brand-500' : 'text-black/60 dark:text-white/60'}`}
+                    onClick={() => setHomeTab('create')}
+                  >
+                    Create
+                  </button>
+                  <button
+                    className={`flex-1 py-3 text-sm font-medium ${homeTab==='join' ? 'text-brand-500 border-b-2 border-brand-500' : 'text-black/60 dark:text-white/60'}`}
+                    onClick={() => setHomeTab('join')}
+                  >
+                    Join
+                  </button>
+                </div>
+                <div className="p-6">
+                  {homeTab === 'create' ? (
+                    <div>
+                      <h3 className="font-semibold">Create a Room</h3>
+                      <p className="mt-1 text-sm text-black/60 dark:text-white/60">Host a synced listening session.</p>
+                      <div className="mt-4 grid gap-3">
+                        <div className="relative">
+                          <input id="create-name-sm" value={createName} onChange={(e)=>setCreateName(e.currentTarget.value)} placeholder=" " className="input peer placeholder-transparent pt-5" />
+                          <label htmlFor="create-name-sm" className="absolute left-3 text-black/60 dark:text-white/60 px-1 bg-white dark:bg-black transition-all duration-200 peer-placeholder-shown:top-1/2 peer-placeholder-shown:-translate-y-1/2 peer-placeholder-shown:text-sm peer-focus:-top-2 peer-focus:translate-y-0 peer-focus:text-xs peer-[&:not(:placeholder-shown)]:-top-2 peer-[&:not(:placeholder-shown)]:translate-y-0 peer-[&:not(:placeholder-shown)]:text-xs">Your Name</label>
+                        </div>
+                        <div className="relative">
+                          <input id="create-room-title-sm" value={roomTitleInput} onChange={(e)=>setRoomTitleInput(e.currentTarget.value)} placeholder=" " className="input peer placeholder-transparent pt-5" />
+                          <label htmlFor="create-room-title-sm" className="absolute left-3 text-black/60 dark:text-white/60 px-1 bg-white dark:bg-black transition-all duration-200 peer-placeholder-shown:top-1/2 peer-placeholder-shown:-translate-y-1/2 peer-placeholder-shown:text-sm peer-focus:-top-2 peer-focus:translate-y-0 peer-focus:text-xs peer-[&:not(:placeholder-shown)]:-top-2 peer-[&:not(:placeholder-shown)]:translate-y-0 peer-[&:not(:placeholder-shown)]:text-xs">Room Name (optional)</label>
+                        </div>
+                        <button onClick={createRoom} className="btn-primary mt-2">Create Room</button>
+                        {error && <p className="text-sm text-red-500" role="alert" aria-live="polite">{error}</p>}
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <h3 className="font-semibold">Join a Room</h3>
+                      <p className="mt-1 text-sm text-black/60 dark:text-white/60">Enter a room code to join.</p>
+                      <div className="mt-4 grid gap-3">
+                        <div className="relative">
+                          <input id="join-name-sm" value={joinName} onChange={(e)=>setJoinName(e.currentTarget.value)} placeholder=" " className="input peer placeholder-transparent pt-5" />
+                          <label htmlFor="join-name-sm" className="absolute left-3 text-black/60 dark:text-white/60 px-1 bg-white dark:bg-black transition-all duration-200 peer-placeholder-shown:top-1/2 peer-placeholder-shown:-translate-y-1/2 peer-placeholder-shown:text-sm peer-focus:-top-2 peer-focus:translate-y-0 peer-focus:text-xs peer-[&:not(:placeholder-shown)]:-top-2 peer-[&:not(:placeholder-shown)]:translate-y-0 peer-[&:not(:placeholder-shown)]:text-xs">Your Name</label>
+                        </div>
+                        <div className="flex gap-2">
+                          <div className="relative flex-1">
+                            <input id="join-code-sm" value={joinCodeInput} onChange={(e)=>setJoinCodeInput(e.currentTarget.value)} placeholder=" " className="input font-mono tracking-widest peer placeholder-transparent pt-5" />
+                            <label htmlFor="join-code-sm" className="absolute left-3 text-black/60 dark:text-white/60 px-1 bg-white dark:bg-black transition-all duration-200 peer-placeholder-shown:top-1/2 peer-placeholder-shown:-translate-y-1/2 peer-placeholder-shown:text-sm peer-focus:-top-2 peer-focus:translate-y-0 peer-focus:text-xs peer-[&:not(:placeholder-shown)]:-top-2 peer-[&:not(:placeholder-shown)]:translate-y-0 peer-[&:not(:placeholder-shown)]:text-xs">Room Code</label>
+                          </div>
+                          <button onClick={joinRoom} className="btn-outline">Join</button>
+                        </div>
+                        {error && <p className="text-sm text-red-500" role="alert" aria-live="polite">{error}</p>}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Medium and up: two cards side-by-side */}
+            <div className="hidden md:grid md:grid-cols-2 gap-6">
               <div className="panel p-6 md:p-7">
                 <h3 className="font-semibold">Create a Room</h3>
                 <p className="mt-1 text-sm text-black/60 dark:text-white/60">Host a synced listening session.</p>
                 <div className="mt-4 grid gap-3">
-                  <div className="grid gap-1.5">
-                    <label className="label">Your Name</label>
-                    <input value={createName} onChange={(e)=>setCreateName(e.currentTarget.value)} placeholder="e.g. Alex" className="input" />
+                  <div className="relative">
+                    <input id="create-name-md" value={createName} onChange={(e)=>setCreateName(e.currentTarget.value)} placeholder=" " className="input peer placeholder-transparent pt-5" />
+                    <label htmlFor="create-name-md" className="absolute left-3 text-black/60 dark:text-white/60 px-1 bg-white dark:bg-black transition-all duration-200 peer-placeholder-shown:top-1/2 peer-placeholder-shown:-translate-y-1/2 peer-placeholder-shown:text-sm peer-focus:-top-2 peer-focus:translate-y-0 peer-focus:text-xs peer-[&:not(:placeholder-shown)]:-top-2 peer-[&:not(:placeholder-shown)]:translate-y-0 peer-[&:not(:placeholder-shown)]:text-xs">Your Name</label>
                   </div>
-                  <div className="grid gap-1.5">
-                    <label className="label">Room Name (optional)</label>
-                    <input value={roomTitleInput} onChange={(e)=>setRoomTitleInput(e.currentTarget.value)} placeholder="e.g. Friday Jam" className="input" />
+                  <div className="relative">
+                    <input id="create-room-title-md" value={roomTitleInput} onChange={(e)=>setRoomTitleInput(e.currentTarget.value)} placeholder=" " className="input peer placeholder-transparent pt-5" />
+                    <label htmlFor="create-room-title-md" className="absolute left-3 text-black/60 dark:text-white/60 px-1 bg-white dark:bg-black transition-all duration-200 peer-placeholder-shown:top-1/2 peer-placeholder-shown:-translate-y-1/2 peer-placeholder-shown:text-sm peer-focus:-top-2 peer-focus:translate-y-0 peer-focus:text-xs peer-[&:not(:placeholder-shown)]:-top-2 peer-[&:not(:placeholder-shown)]:translate-y-0 peer-[&:not(:placeholder-shown)]:text-xs">Room Name (optional)</label>
                   </div>
                   <button onClick={createRoom} className="btn-primary mt-2">Create Room</button>
                 </div>
@@ -1916,12 +1988,15 @@ export default function App(): JSX.Element {
                 <h3 className="font-semibold">Join a Room</h3>
                 <p className="mt-1 text-sm text-black/60 dark:text-white/60">Enter a room code to join.</p>
                 <div className="mt-4 grid gap-3">
-                  <div className="grid gap-1.5">
-                    <label className="label">Your Name</label>
-                    <input value={joinName} onChange={(e)=>setJoinName(e.currentTarget.value)} placeholder="e.g. Alex" className="input" />
+                  <div className="relative">
+                    <input id="join-name-md" value={joinName} onChange={(e)=>setJoinName(e.currentTarget.value)} placeholder=" " className="input peer placeholder-transparent pt-5" />
+                    <label htmlFor="join-name-md" className="absolute left-3 text-black/60 dark:text-white/60 px-1 bg-white dark:bg-black transition-all duration-200 peer-placeholder-shown:top-1/2 peer-placeholder-shown:-translate-y-1/2 peer-placeholder-shown:text-sm peer-focus:-top-2 peer-focus:translate-y-0 peer-focus:text-xs peer-[&:not(:placeholder-shown)]:-top-2 peer-[&:not(:placeholder-shown)]:translate-y-0 peer-[&:not(:placeholder-shown)]:text-xs">Your Name</label>
                   </div>
                   <div className="flex gap-2">
-                    <input value={joinCodeInput} onChange={(e)=>setJoinCodeInput(e.currentTarget.value)} placeholder="Enter room code" className="input font-mono tracking-widest" />
+                    <div className="relative flex-1">
+                      <input id="join-code-md" value={joinCodeInput} onChange={(e)=>setJoinCodeInput(e.currentTarget.value)} placeholder=" " className="input font-mono tracking-widest peer placeholder-transparent pt-5" />
+                      <label htmlFor="join-code-md" className="absolute left-3 text-black/60 dark:text-white/60 px-1 bg-white dark:bg-black transition-all duration-200 peer-placeholder-shown:top-1/2 peer-placeholder-shown:-translate-y-1/2 peer-placeholder-shown:text-sm peer-focus:-top-2 peer-focus:translate-y-0 peer-focus:text-xs peer-[&:not(:placeholder-shown)]:-top-2 peer-[&:not(:placeholder-shown)]:translate-y-0 peer-[&:not(:placeholder-shown)]:text-xs">Room Code</label>
+                    </div>
                     <button onClick={joinRoom} className="btn-outline">Join</button>
                   </div>
                   {error && <p className="text-sm text-red-500" role="alert" aria-live="polite">{error}</p>}
@@ -2043,6 +2118,11 @@ export default function App(): JSX.Element {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="font-medium text-black dark:text-white truncate">{p.name}</span>
+                        {p.isHost && (
+                          <span className="px-2 py-0.5 bg-yellow-500/20 text-yellow-700 dark:text-yellow-400 text-[10px] font-medium rounded-full border border-yellow-500/30">
+                            HOST
+                          </span>
+                        )}
                       </div>
                       <p className="text-[11px] text-black/50 dark:text-white/50">Connected</p>
                     </div>
