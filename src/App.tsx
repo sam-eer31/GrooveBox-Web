@@ -1158,11 +1158,27 @@ export default function App(): JSX.Element {
     if (!supabase) return false
     const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
     try {
-      const { data } = await supabase.storage.from(bucket).download(`rooms/${code}/meta/meta.json`)
-      return !!data
-    } catch {
-      return false
-    }
+      // Preferred: check meta folder for meta.json
+      const { data: metaList } = await supabase.storage.from(bucket).list(`rooms/${code}/meta`, {
+        limit: 10,
+        search: 'meta.json'
+      })
+      if (Array.isArray(metaList) && metaList.some(f => f.name === 'meta.json')) return true
+    } catch {}
+    try {
+      // Legacy fallback: meta.json at root
+      const { data: legacyList } = await supabase.storage.from(bucket).list(`rooms/${code}`, {
+        limit: 10,
+        search: 'meta.json'
+      })
+      if (Array.isArray(legacyList) && legacyList.some(f => f.name === 'meta.json')) return true
+    } catch {}
+    try {
+      // Fallback: presence of any track under tracks/
+      const { data: tracksList } = await supabase.storage.from(bucket).list(`rooms/${code}/tracks`, { limit: 1 })
+      if (Array.isArray(tracksList) && tracksList.length > 0) return true
+    } catch {}
+    return false
   }
 
   const roomEndedFlagExists = async (code: string): Promise<boolean> => {
@@ -1224,6 +1240,7 @@ export default function App(): JSX.Element {
       const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
       const meta = { roomName: roomTitleInput.trim(), hostName: name, createdAt: new Date().toISOString() }
       const metaBlob = new Blob([JSON.stringify(meta)], { type: 'application/json' })
+      // Ensure meta prefix exists by uploading meta.json; list-based existence checks will find it
       await supabase.storage.from(bucket).upload(`rooms/${code}/meta/meta.json`, metaBlob, { upsert: true, cacheControl: 'no-cache' })
       // Clear any ended flag if it exists for this code reuse (defensive)
       try { await supabase.storage.from(bucket).remove([`ended/${code}.json`]) } catch {}
