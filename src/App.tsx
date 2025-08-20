@@ -345,14 +345,14 @@ export default function App(): JSX.Element {
     }
     try {
       const nowBlob = new Blob([JSON.stringify(nowEntry)], { type: 'application/json' })
-      await sb.storage.from(bucket).upload(`${prefix}/now.json`, nowBlob, { upsert: true, cacheControl: 'no-cache' })
+      await sb.storage.from(bucket).upload(`${prefix}/meta/now.json`, nowBlob, { upsert: true, cacheControl: 'no-cache' })
     } catch (e) {
       console.log('Failed to write now.json:', e)
     }
     try {
       let history: any[] = []
       try {
-        const { data } = await sb.storage.from(bucket).download(`${prefix}/history.json`)
+        const { data } = await sb.storage.from(bucket).download(`${prefix}/meta/history.json`)
         if (data) {
           const text = await data.text()
           history = JSON.parse(text)
@@ -361,7 +361,7 @@ export default function App(): JSX.Element {
       } catch {}
       history.push(nowEntry)
       const histBlob = new Blob([JSON.stringify(history)], { type: 'application/json' })
-      await sb.storage.from(bucket).upload(`${prefix}/history.json`, histBlob, { upsert: true, cacheControl: 'no-cache' })
+      await sb.storage.from(bucket).upload(`${prefix}/meta/history.json`, histBlob, { upsert: true, cacheControl: 'no-cache' })
     } catch (e) {
       console.log('Failed to write history.json:', e)
     }
@@ -425,7 +425,7 @@ export default function App(): JSX.Element {
     })
     try {
       const blob = new Blob([JSON.stringify({ updatedAt: new Date().toISOString(), listeners: snapshot })], { type: 'application/json' })
-      await sb.storage.from(bucket).upload(`${prefix}/listeners.json`, blob, { upsert: true, cacheControl: 'no-cache' })
+      await sb.storage.from(bucket).upload(`${prefix}/meta/listeners.json`, blob, { upsert: true, cacheControl: 'no-cache' })
     } catch (e) {
       console.log('Failed to write listeners.json:', e)
     }
@@ -578,7 +578,7 @@ export default function App(): JSX.Element {
         const cleanedFileName = cleanFileName(file.name)
         // Encode the cleaned filename to handle special characters safely
         const encodedFileName = encodeURIComponent(cleanedFileName)
-        const path = `rooms/${roomCode}/${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}-${encodedFileName}`
+        const path = `rooms/${roomCode}/tracks/${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}-${encodedFileName}`
 
         // Create a custom upload with progress tracking
         const uploadWithProgress = async (): Promise<{ error?: any }> => {
@@ -741,7 +741,7 @@ export default function App(): JSX.Element {
         const shouldWriteMeta = (import.meta.env.VITE_ENABLE_TRACKS_META as string) === '1'
         if (shouldWriteMeta) {
           try {
-            const metaPath = `rooms/${roomCode}/tracks.json`
+            const metaPath = `rooms/${roomCode}/meta/tracks.json`
             const { data: existing } = await supabase.storage.from(bucket).download(metaPath)
             let trackMeta: Array<{ path: string; name: string }> = []
             if (existing) {
@@ -809,9 +809,11 @@ export default function App(): JSX.Element {
       setIsLoadingLibrary(true)
       try {
         const prefix = `rooms/${roomCode}`
+        const metaPrefix = `rooms/${roomCode}/meta`
+        const tracksPrefix = `rooms/${roomCode}/tracks`
         // Load room meta
         try {
-          const { data: metaFile } = await supabase.storage.from(bucket).download(`${prefix}/meta.json`)
+          const { data: metaFile } = await supabase.storage.from(bucket).download(`${metaPrefix}/meta.json`)
           if (metaFile) {
             const text = await metaFile.text()
             const meta = JSON.parse(text) as { roomName?: string, hostName?: string }
@@ -823,7 +825,7 @@ export default function App(): JSX.Element {
         try {
           const canReadMeta = (import.meta.env.VITE_ENABLE_TRACKS_META as string) === '1'
           if (canReadMeta) {
-            const { data: tracksFile } = await supabase.storage.from(bucket).download(`${prefix}/tracks.json`)
+            const { data: tracksFile } = await supabase.storage.from(bucket).download(`${metaPrefix}/tracks.json`)
             if (tracksFile) {
               const text = await tracksFile.text()
               const list = JSON.parse(text) as Array<{ path: string; name: string }>
@@ -831,7 +833,18 @@ export default function App(): JSX.Element {
             }
           }
         } catch {}
-        const { data: files, error: listErr } = await supabase.storage.from(bucket).list(prefix, {
+        // Read canonical order from meta/tracks.json if available
+        let canonicalOrder: Array<{ path: string; name: string }> | null = null
+        try {
+          const { data: orderFile } = await supabase.storage.from(bucket).download(`${metaPrefix}/tracks.json`)
+          if (orderFile) {
+            const text = await orderFile.text()
+            const parsed = JSON.parse(text)
+            if (Array.isArray(parsed)) canonicalOrder = parsed
+          }
+        } catch {}
+
+        const { data: files, error: listErr } = await supabase.storage.from(bucket).list(tracksPrefix, {
           limit: 100,
           sortBy: { column: 'name', order: 'asc' }
         })
@@ -843,19 +856,27 @@ export default function App(): JSX.Element {
         }
 
         const loaded: Track[] = []
-        for (const f of files) {
-          const lower = (f.name || '').toLowerCase()
-          // Skip all JSON meta files and non-audio files
-          if (lower.endsWith('.json')) continue
-          if (!/(\.mp3|\.wav|\.m4a|\.aac|\.flac|\.ogg|\.oga|\.opus)$/i.test(lower)) continue
-          if (f.name === 'tracks.json') continue
-          const path = `${prefix}/${f.name}`
-          // The filename from Supabase list is already the stored filename (encoded)
+        const pushTrack = async (fileName: string, display?: string) => {
+          const lower = (fileName || '').toLowerCase()
+          if (!/(\.mp3|\.wav|\.m4a|\.aac|\.flac|\.ogg|\.oga|\.opus)$/i.test(lower)) return
+          const path = `${tracksPrefix}/${fileName}`
           const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
           const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl
-          if (!url) continue
-          const displayName = nameByPath.get(path) || deriveDisplayNameFromObjectName(f.name)
+          if (!url) return
+          const displayName = display || nameByPath.get(path) || deriveDisplayNameFromObjectName(fileName)
           loaded.push({ id: path, url, name: displayName, path })
+        }
+
+        if (canonicalOrder && canonicalOrder.length > 0) {
+          for (const it of canonicalOrder) {
+            const parts = (it.path || '').split('/')
+            const fileName = parts[parts.length - 1]
+            if (fileName) await pushTrack(fileName, it.name)
+          }
+        } else {
+          for (const f of files) {
+            await pushTrack(f.name)
+          }
         }
 
         setTracks(loaded)
@@ -1063,7 +1084,11 @@ export default function App(): JSX.Element {
       while (true) {
         const { data: files, error: listErr } = await supabase.storage.from(bucket).list(`rooms/${roomCode}`, { limit, offset, sortBy: { column: 'name', order: 'asc' } })
         if (listErr) break
-        const batch = (files || []).map(f => `rooms/${roomCode}/${f.name}`)
+        const batch = (files || []).flatMap(f => [
+          `rooms/${roomCode}/${f.name}`,
+          `rooms/${roomCode}/tracks/${f.name}`,
+          `rooms/${roomCode}/meta/${f.name}`
+        ])
         if (batch.length === 0) break
         // Remove in chunks to avoid limits
         const chunkSize = 100
@@ -1133,11 +1158,8 @@ export default function App(): JSX.Element {
     if (!supabase) return false
     const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
     try {
-      const { data: list } = await supabase.storage.from(bucket).list(`rooms/${code}`, {
-        limit: 1,
-        search: 'meta.json'
-      })
-      return Array.isArray(list) && list.some(f => f.name === 'meta.json')
+      const { data } = await supabase.storage.from(bucket).download(`rooms/${code}/meta/meta.json`)
+      return !!data
     } catch {
       return false
     }
@@ -1202,7 +1224,7 @@ export default function App(): JSX.Element {
       const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
       const meta = { roomName: roomTitleInput.trim(), hostName: name, createdAt: new Date().toISOString() }
       const metaBlob = new Blob([JSON.stringify(meta)], { type: 'application/json' })
-      await supabase.storage.from(bucket).upload(`rooms/${code}/meta.json`, metaBlob, { upsert: true, cacheControl: 'no-cache' })
+      await supabase.storage.from(bucket).upload(`rooms/${code}/meta/meta.json`, metaBlob, { upsert: true, cacheControl: 'no-cache' })
       // Clear any ended flag if it exists for this code reuse (defensive)
       try { await supabase.storage.from(bucket).remove([`ended/${code}.json`]) } catch {}
       setRoomTitle(meta.roomName || '')
@@ -1389,12 +1411,12 @@ export default function App(): JSX.Element {
       const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
       const added: Track[] = []
       for (const it of items) {
-        if (it.name === 'meta.json') continue
-        // The path from broadcast is already the stored path (encoded)
-        const { data: signed } = await sb.storage.from(bucket).createSignedUrl(it.path, 60 * 60 * 24 * 7)
-        const url = signed?.signedUrl || sb.storage.from(bucket).getPublicUrl(it.path).data.publicUrl
+        const tracksPrefix = `rooms/${roomCode}/tracks`
+        const normalizedPath = it.path && it.path.startsWith(`${tracksPrefix}/`) ? it.path : `${tracksPrefix}/${encodeURIComponent(it.name)}`
+        const { data: signed } = await sb.storage.from(bucket).createSignedUrl(normalizedPath, 60 * 60 * 24 * 7)
+        const url = signed?.signedUrl || sb.storage.from(bucket).getPublicUrl(normalizedPath).data.publicUrl
         if (!url) continue
-        added.push({ id: it.path, url, name: it.name, path: it.path })
+        added.push({ id: normalizedPath, url, name: it.name, path: normalizedPath })
       }
               if (added.length > 0) {
           setTracks(prev => {
