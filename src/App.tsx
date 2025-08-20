@@ -165,6 +165,16 @@ export default function App(): JSX.Element {
   const displayNameRef = useRef<string>('')
   const pendingSelfNameRef = useRef<string | null>(null)
 
+  // Host authority and enforcement helpers
+  const isHostRef = useRef<boolean>(false)
+  const roomEnforcementTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const roomEnforcementEndAtRef = useRef<number>(0)
+  const roomEnforcementIndexRef = useRef<number>(-1)
+  const roomNowStartedAtRef = useRef<number>(0)
+  const participantNowRef = useRef<Map<string, { index: number; updatedAt: number }>>(new Map())
+  const suppressEnforcementRef = useRef<boolean>(false)
+  const lastListenersWriteAtRef = useRef<number>(0)
+
   // Global command queue for room-wide synchronization
   const globalCommandQueueRef = useRef<Array<{ command: string; payload: any; sender: string; timestamp: number }>>([])
   const isProcessingGlobalQueueRef = useRef<boolean>(false)
@@ -267,6 +277,16 @@ export default function App(): JSX.Element {
     audio.currentTime = time
     await audio.play()
     setIsPlaying(true)
+
+    // Host records now-playing + kicks off 3s enforcement window
+    if (isHostRef.current && !suppressEnforcementRef.current) {
+      try {
+        await recordRoomNowAndHistory(index)
+        startNowEnforcement(index, time)
+      } catch (e) {
+        console.log('record/enforce error:', e)
+      }
+    }
   }
 
   const executePauseCommand = async (payload: any) => {
@@ -309,6 +329,108 @@ export default function App(): JSX.Element {
     shouldAutoplayRef.current = true
   }
 
+  // Persist the room's now playing and append history (host only)
+  const recordRoomNowAndHistory = async (index: number) => {
+    const sb = supabase
+    if (!sb || !roomCode) return
+    const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
+    const prefix = `rooms/${roomCode}`
+    const track = tracksRef.current[index]
+    const nowEntry = {
+      index,
+      trackId: track?.id || track?.path || null,
+      trackName: track?.name || null,
+      startedAt: new Date().toISOString(),
+      startedBy: displayNameRef.current || 'Host',
+    }
+    try {
+      const nowBlob = new Blob([JSON.stringify(nowEntry)], { type: 'application/json' })
+      await sb.storage.from(bucket).upload(`${prefix}/now.json`, nowBlob, { upsert: true, cacheControl: 'no-cache' })
+    } catch (e) {
+      console.log('Failed to write now.json:', e)
+    }
+    try {
+      let history: any[] = []
+      try {
+        const { data } = await sb.storage.from(bucket).download(`${prefix}/history.json`)
+        if (data) {
+          const text = await data.text()
+          history = JSON.parse(text)
+          if (!Array.isArray(history)) history = []
+        }
+      } catch {}
+      history.push(nowEntry)
+      const histBlob = new Blob([JSON.stringify(history)], { type: 'application/json' })
+      await sb.storage.from(bucket).upload(`${prefix}/history.json`, histBlob, { upsert: true, cacheControl: 'no-cache' })
+    } catch (e) {
+      console.log('Failed to write history.json:', e)
+    }
+  }
+
+  // Start 3s enforcement window to ensure all clients are on the same track
+  const startNowEnforcement = (index: number, time: number) => {
+    const ch = channelRef.current
+    if (!ch) return
+    roomEnforcementIndexRef.current = index
+    roomNowStartedAtRef.current = Date.now() - Math.floor(time * 1000)
+    roomEnforcementEndAtRef.current = Date.now() + 3000
+
+    // Announce now playing to all
+    try {
+      ch.send({
+        type: 'broadcast',
+        event: 'room:now_playing',
+        payload: { sender: clientIdRef.current, index, startedAt: roomNowStartedAtRef.current }
+      })
+    } catch {}
+
+    // Clear any previous timer
+    if (roomEnforcementTimerRef.current) {
+      clearInterval(roomEnforcementTimerRef.current)
+      roomEnforcementTimerRef.current = null
+    }
+
+    // Poll all clients to report state and enforce mismatches for 3 seconds
+    roomEnforcementTimerRef.current = setInterval(() => {
+      const now = Date.now()
+      if (now > roomEnforcementEndAtRef.current) {
+        // Write a final listeners snapshot at the end of the window
+        try { void writeListenersSnapshot() } catch {}
+        if (roomEnforcementTimerRef.current) {
+          clearInterval(roomEnforcementTimerRef.current)
+          roomEnforcementTimerRef.current = null
+        }
+        return
+      }
+      try {
+        ch.send({
+          type: 'broadcast',
+          event: 'room:verify_now',
+          payload: { sender: clientIdRef.current, expectedIndex: index }
+        })
+      } catch {}
+    }, 400)
+  }
+
+  // Persist snapshot of what each participant is listening to (host only)
+  const writeListenersSnapshot = async () => {
+    const sb = supabase
+    if (!sb || !roomCode || !isHostRef.current) return
+    const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
+    const prefix = `rooms/${roomCode}`
+    const snapshot: Array<{ clientId: string; name: string; index: number; updatedAt: string }> = []
+    participantNowRef.current.forEach((val, key) => {
+      const name = clientIdToNameRef.current.get(key) || (key === clientIdRef.current ? (displayNameRef.current || 'Host') : 'Guest')
+      snapshot.push({ clientId: key, name, index: val.index, updatedAt: new Date(val.updatedAt).toISOString() })
+    })
+    try {
+      const blob = new Blob([JSON.stringify({ updatedAt: new Date().toISOString(), listeners: snapshot })], { type: 'application/json' })
+      await sb.storage.from(bucket).upload(`${prefix}/listeners.json`, blob, { upsert: true, cacheControl: 'no-cache' })
+    } catch (e) {
+      console.log('Failed to write listeners.json:', e)
+    }
+  }
+
 
 
   // Toast helpers bound to state
@@ -339,6 +461,8 @@ export default function App(): JSX.Element {
 
   // Keep displayName ref in sync to avoid stale closures when tracking presence
   useEffect(() => { displayNameRef.current = displayName }, [displayName])
+  // Keep isHost ref in sync
+  useEffect(() => { isHostRef.current = isHost }, [isHost])
 
   // Keep refs in sync to avoid stale closures in realtime handlers
   useEffect(() => { tracksRef.current = tracks }, [tracks])
@@ -1351,6 +1475,65 @@ export default function App(): JSX.Element {
       }
       
       setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+    })
+
+
+    // Announcements: room current track (informational)
+    ch.on('broadcast', { event: 'room:now_playing' }, ({ payload }) => {
+      if (!payload) return
+      // Could be used to update UI badges; no-op for now
+    })
+
+    // Host polls: clients must report their current state
+    ch.on('broadcast', { event: 'room:verify_now' }, ({ payload }) => {
+      if (!payload) return
+      // All clients respond with their current index/time
+      const audio = audioRef.current
+      const idx = currentIndexRef.current
+      const t = audio ? audio.currentTime : 0
+      try {
+        ch.send({
+          type: 'broadcast',
+          event: 'client:state',
+          payload: { sender: clientIdRef.current, index: idx, time: t }
+        })
+      } catch {}
+    })
+
+    // Host receives client states during enforcement and forces corrections
+    ch.on('broadcast', { event: 'client:state' }, ({ payload }) => {
+      if (!payload || !isHost) return
+      const clientKey = payload.sender as string
+      const clientIndex = Number(payload.index)
+      participantNowRef.current.set(clientKey, { index: clientIndex, updatedAt: Date.now() })
+
+      // Only enforce during active window
+      if (Date.now() <= roomEnforcementEndAtRef.current && roomEnforcementIndexRef.current >= 0) {
+        if (clientIndex !== roomEnforcementIndexRef.current) {
+          const elapsedSec = Math.max(0, Math.floor((Date.now() - roomNowStartedAtRef.current) / 1000))
+          try {
+            ch.send({
+              type: 'broadcast',
+              event: 'host:force_now',
+              payload: { target: clientKey, index: roomEnforcementIndexRef.current, time: elapsedSec }
+            })
+          } catch {}
+        }
+      }
+    })
+
+    // Clients accept targeted correction and immediately play the room's current song
+    ch.on('broadcast', { event: 'host:force_now' }, async ({ payload }) => {
+      if (!payload || payload.target !== clientIdRef.current) return
+      try {
+        isApplyingRemoteRef.current = true
+        suppressEnforcementRef.current = true
+        await executeSelectCommand({ index: payload.index })
+        await executePlayCommand({ index: payload.index, time: payload.time || 0 })
+      } finally {
+        suppressEnforcementRef.current = false
+        setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+      }
     })
 
 
