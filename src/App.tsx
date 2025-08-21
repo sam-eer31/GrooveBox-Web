@@ -184,6 +184,13 @@ export default function App(): JSX.Element {
   const lastNowRecordAtRef = useRef<number>(0)
   const isShuffleRef = useRef<boolean>(false)
 
+  // Keep refs synchronized with React state
+  useEffect(() => { isHostRef.current = isHost }, [isHost])
+  useEffect(() => { tracksRef.current = tracks }, [tracks])
+  useEffect(() => { currentIndexRef.current = currentIndex }, [currentIndex])
+  useEffect(() => { isPlayingRef.current = isPlaying }, [isPlaying])
+  useEffect(() => { displayNameRef.current = displayName }, [displayName])
+
   // Global command queue for room-wide synchronization
   const globalCommandQueueRef = useRef<Array<{ command: string; payload: any; sender: string; timestamp: number }>>([])
   const isProcessingGlobalQueueRef = useRef<boolean>(false)
@@ -314,6 +321,15 @@ export default function App(): JSX.Element {
     setIsPlaying(false)
     shouldAutoplayRef.current = false
     setCurrentTime(time)
+
+    // Host also enforces paused state for 3s window
+    if (isHostRef.current && !suppressEnforcementRef.current) {
+      try {
+        startNowEnforcement(currentIndexRef.current, time, false)
+      } catch (e) {
+        console.log('pause enforce error:', e)
+      }
+    }
   }
 
   const executeSeekCommand = async (payload: any) => {
@@ -420,15 +436,15 @@ export default function App(): JSX.Element {
     }
   }
 
-  // Start 3s enforcement window to ensure all clients are on the same track
-  const startNowEnforcement = (index: number, time: number) => {
+  // Start 3s enforcement window to ensure all clients are on the same track and play/pause state
+  const startNowEnforcement = (index: number, time: number, expectedPlaying: boolean = true) => {
     const ch = channelRef.current
     if (!ch) return
     roomEnforcementIndexRef.current = index
     roomNowStartedAtRef.current = Date.now() - Math.floor(time * 1000)
     roomEnforcementEndAtRef.current = Date.now() + 3000
-    roomExpectedPlayingRef.current = true
-    roomExpectedFrozenElapsedRef.current = 0
+    roomExpectedPlayingRef.current = expectedPlaying
+    roomExpectedFrozenElapsedRef.current = expectedPlaying ? 0 : Math.max(0, Math.floor(time))
 
     // Announce now playing to all
     try {
@@ -447,8 +463,10 @@ export default function App(): JSX.Element {
 
     const sendVerify = () => {
       try {
-        const expectedElapsed = Math.max(0, Math.floor((Date.now() - roomNowStartedAtRef.current) / 1000))
         const expectedPlaying = roomExpectedPlayingRef.current
+        const expectedElapsed = expectedPlaying
+          ? Math.max(0, Math.floor((Date.now() - roomNowStartedAtRef.current) / 1000))
+          : roomExpectedFrozenElapsedRef.current
         ch.send({
           type: 'broadcast',
           event: 'room:verify_now',
@@ -1596,7 +1614,7 @@ export default function App(): JSX.Element {
       if (withinWindow && Number.isFinite(expectedIdx) && expectedIdx >= 0 && expectedIdx < tracksRef.current.length) {
         const needsTrack = idx !== expectedIdx
         const drift = Math.abs(t - expectedElapsed)
-        const needsTime = drift > 0.5 // allow small tolerance
+        const needsTime = expectedPlaying ? drift > 0.5 : Math.abs(t - expectedElapsed) > 0.25
         const needsPlayPause = playing !== expectedPlaying
         if (needsTrack || needsTime || needsPlayPause) {
           void (async () => {
@@ -1630,10 +1648,12 @@ export default function App(): JSX.Element {
       // Only enforce during active window
       if (Date.now() <= roomEnforcementEndAtRef.current && roomEnforcementIndexRef.current >= 0) {
         const expectedIdx = roomEnforcementIndexRef.current
-        const expectedElapsed = Math.max(0, Math.floor((Date.now() - roomNowStartedAtRef.current) / 1000))
+        const expectedElapsed = roomExpectedPlayingRef.current
+          ? Math.max(0, Math.floor((Date.now() - roomNowStartedAtRef.current) / 1000))
+          : roomExpectedFrozenElapsedRef.current
         const expectedPlaying = roomExpectedPlayingRef.current
         const drift = Math.abs(clientTime - expectedElapsed)
-        if (clientIndex !== expectedIdx || drift > 0.5 || clientPlaying !== expectedPlaying) {
+        if (clientIndex !== expectedIdx || (roomExpectedPlayingRef.current ? drift > 0.5 : drift > 0.25) || clientPlaying !== expectedPlaying) {
           try {
             ch.send({
               type: 'broadcast',
@@ -1695,7 +1715,7 @@ export default function App(): JSX.Element {
       console.log('Host responding with state:', { 
         index: currentIndexRef.current, 
         time: currentTime, 
-        isPlaying: isPlaying,
+        isPlaying: isPlayingRef.current,
         isShuffle: isShuffleRef.current
       })
       
@@ -1705,7 +1725,7 @@ export default function App(): JSX.Element {
         payload: {
           index: currentIndexRef.current,
           time: currentTime,
-          isPlaying: isPlaying,
+          isPlaying: isPlayingRef.current,
           isShuffle: isShuffleRef.current,
           sender: clientIdRef.current,
           target: payload.sender
