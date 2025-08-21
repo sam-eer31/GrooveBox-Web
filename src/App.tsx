@@ -855,44 +855,7 @@ export default function App(): JSX.Element {
           const payload = uploadedTracks.map(t => ({ path: t.path, name: cleanFileName(t.name) }))
           channelRef.current.send({ type: 'broadcast', event: 'playlist:add', payload: { items: payload, sender: clientIdRef.current } })
         }
-        // After sending playlist:add, reload canonical order for uploader as well
-        try {
-          setIsLoadingLibrary(true)
-          const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
-          const metaPrefix = `rooms/${roomCode}/meta`
-          let canonicalOrder: Array<{ path: string; name: string }> | null = null
-          const { data: orderFile } = await supabase.storage.from(bucket).download(`${metaPrefix}/tracks.json`)
-          if (orderFile) {
-            const text = await orderFile.text()
-            const parsed = JSON.parse(text)
-            if (Array.isArray(parsed)) canonicalOrder = parsed
-          }
-          const tracksPrefix = `rooms/${roomCode}/tracks`
-          const loaded: Track[] = []
-          const pushTrack = async (fileName: string, display?: string) => {
-            const lower = (fileName || '').toLowerCase()
-            if (!/\.(mp3|wav|m4a|aac|flac|ogg|oga|opus)$/i.test(lower)) return
-            const path = `${tracksPrefix}/${fileName}`
-            const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
-            const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl
-            if (!url) return
-            loaded.push({ id: path, url, name: display || fileName, path })
-          }
-          if (canonicalOrder && canonicalOrder.length > 0) {
-            for (const it of canonicalOrder) {
-              const parts = (it.path || '').split('/')
-              const fileName = parts[parts.length - 1]
-              if (fileName) await pushTrack(fileName, it.name)
-            }
-          }
-          setTracks(loaded)
-          setCurrentIndex(loaded.length > 0 ? 0 : -1)
-          setCurrentTime(0)
-        } catch (e) {
-          console.error('Failed to reload canonical playlist order after upload:', e)
-        } finally {
-          setIsLoadingLibrary(false)
-        }
+        // Do not reload canonical order here; we already appended locally and broadcasted
       }
 
       // All uploads completed successfully (if not cancelled)
@@ -1521,43 +1484,34 @@ export default function App(): JSX.Element {
 
     ch.on('broadcast', { event: 'playlist:add' }, async ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
-      // Instead of appending, reload canonical order from meta/tracks.json
+      const items = Array.isArray((payload as any).items) ? (payload as any).items as Array<{ path: string; name?: string }> : []
+      if (items.length === 0) return
       try {
-        setIsLoadingLibrary(true)
         const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
-        const metaPrefix = `rooms/${roomCode}/meta`
-        let canonicalOrder: Array<{ path: string; name: string }> | null = null
-        const { data: orderFile } = await supabase.storage.from(bucket).download(`${metaPrefix}/tracks.json`)
-        if (orderFile) {
-          const text = await orderFile.text()
-          const parsed = JSON.parse(text)
-          if (Array.isArray(parsed)) canonicalOrder = parsed
-        }
-        const tracksPrefix = `rooms/${roomCode}/tracks`
-        const loaded: Track[] = []
-        const pushTrack = async (fileName: string, display?: string) => {
-          const lower = (fileName || '').toLowerCase()
-          if (!/\.(mp3|wav|m4a|aac|flac|ogg|oga|opus)$/i.test(lower)) return
-          const path = `${tracksPrefix}/${fileName}`
+        const newTracks: Track[] = []
+        for (const it of items) {
+          const path = it.path
+          if (!path) continue
           const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
           const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl
-          if (!url) return
-          loaded.push({ id: path, url, name: display || fileName, path })
+          if (!url) continue
+          const fileName = path.split('/').pop() || path
+          newTracks.push({ id: path, url, name: it.name || fileName, path })
         }
-        if (canonicalOrder && canonicalOrder.length > 0) {
-          for (const it of canonicalOrder) {
-            const parts = (it.path || '').split('/')
-            const fileName = parts[parts.length - 1]
-            if (fileName) await pushTrack(fileName, it.name)
+        if (newTracks.length === 0) return
+        setTracks(prev => {
+          const existing = new Set(prev.map(t => t.path))
+          const toAdd = newTracks.filter(t => !existing.has(t.path))
+          if (toAdd.length === 0) return prev
+          if (prev.length === 0) {
+            setCurrentIndex(0)
+            setCurrentTime(0)
+            setIsPlaying(false)
           }
-        }
-        setTracks(loaded)
-        setCurrentIndex(loaded.length > 0 ? 0 : -1)
-        setCurrentTime(0)
+          return [...prev, ...toAdd]
+        })
       } catch (e) {
-        console.error('Failed to reload canonical playlist order:', e)
-      } finally {
-        setIsLoadingLibrary(false)
+        console.error('Failed to append tracks from playlist:add payload:', e)
       }
     })
 
