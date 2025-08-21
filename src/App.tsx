@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Music, Sun, Moon, Upload as UploadIcon, Power, LogOut, Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Users, Menu, X, Copy, Check } from 'lucide-react'
+import { Music, Sun, Moon, Upload as UploadIcon, Power, LogOut, Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Users, Menu, X, Copy, Check, Shuffle } from 'lucide-react'
 import { supabase } from './lib/supabaseClient'
 
 type Track = {
@@ -131,6 +131,7 @@ export default function App(): JSX.Element {
   const [isRestoringSession, setIsRestoringSession] = useState<boolean>(true)
   const [previousVolume, setPreviousVolume] = useState<number>(1)
   const [isCodeCopied, setIsCodeCopied] = useState<boolean>(false)
+  const [isShuffle, setIsShuffle] = useState<boolean>(false)
   const mobileMenuRef = useRef<HTMLDivElement>(null)
   
   // Close participants dropdown and mobile menu when clicking outside
@@ -174,6 +175,14 @@ export default function App(): JSX.Element {
   const participantNowRef = useRef<Map<string, { index: number; updatedAt: number }>>(new Map())
   const suppressEnforcementRef = useRef<boolean>(false)
   const lastListenersWriteAtRef = useRef<number>(0)
+  const isPlayingRef = useRef<boolean>(false)
+  const roomExpectedPlayingRef = useRef<boolean>(true)
+  const roomExpectedFrozenElapsedRef = useRef<number>(0)
+  // Meta write guards
+  const disableMetaWritesRef = useRef<boolean>(false)
+  const lastNowRecordIndexRef = useRef<number>(-1)
+  const lastNowRecordAtRef = useRef<number>(0)
+  const isShuffleRef = useRef<boolean>(false)
 
   // Global command queue for room-wide synchronization
   const globalCommandQueueRef = useRef<Array<{ command: string; payload: any; sender: string; timestamp: number }>>([])
@@ -211,6 +220,12 @@ export default function App(): JSX.Element {
             break
           case 'previous':
             await executePreviousCommand(payload)
+            break
+          case 'shuffle_toggle':
+            await executeShuffleToggleCommand(payload)
+            break
+          case 'shuffle_next':
+            await executeShuffleNextCommand(payload)
             break
           case 'select':
             await executeSelectCommand(payload)
@@ -312,7 +327,9 @@ export default function App(): JSX.Element {
     const total = tracksRef.current.length
     if (total === 0) return
     const fromIndex = typeof payload?.fromIndex === 'number' ? payload.fromIndex : currentIndexRef.current
-    const nextIndex = (fromIndex + 1 + total) % total
+    // If shuffle is active and a specific nextIndex is provided, honor it; otherwise compute sequential
+    const providedIndex = typeof payload?.nextIndex === 'number' ? payload.nextIndex : null
+    const nextIndex = providedIndex !== null ? providedIndex : (fromIndex + 1 + total) % total
     setCurrentIndex(nextIndex)
     setCurrentTime(0)
     shouldAutoplayRef.current = true
@@ -326,7 +343,8 @@ export default function App(): JSX.Element {
     const total = tracksRef.current.length
     if (total === 0) return
     const fromIndex = typeof payload?.fromIndex === 'number' ? payload.fromIndex : currentIndexRef.current
-    const prevIndex = (fromIndex - 1 + total) % total
+    const providedIndex = typeof payload?.prevIndex === 'number' ? payload.prevIndex : null
+    const prevIndex = providedIndex !== null ? providedIndex : (fromIndex - 1 + total) % total
     setCurrentIndex(prevIndex)
     setCurrentTime(0)
     shouldAutoplayRef.current = true
@@ -343,6 +361,18 @@ export default function App(): JSX.Element {
     shouldAutoplayRef.current = true
   }
 
+  // Shuffle command handlers
+  const executeShuffleToggleCommand = async (payload: any) => {
+    const { enabled } = payload as { enabled: boolean }
+    setIsShuffle(Boolean(enabled))
+  }
+
+  const executeShuffleNextCommand = async (payload: any) => {
+    const { nextIndex } = payload as { nextIndex: number }
+    if (typeof nextIndex !== 'number') return
+    await executeNextCommand({ fromIndex: currentIndexRef.current, nextIndex })
+  }
+
   // Persist the room's now playing and append history (host only)
   const recordRoomNowAndHistory = async (index: number) => {
     const sb = supabase
@@ -357,11 +387,19 @@ export default function App(): JSX.Element {
       startedAt: new Date().toISOString(),
       startedBy: displayNameRef.current || 'Host',
     }
+    // Skip if meta writes were disabled due to previous failures
+    if (disableMetaWritesRef.current) return
+    // Throttle: only once per index within 3s window
+    if (lastNowRecordIndexRef.current === index && Date.now() - lastNowRecordAtRef.current < 3000) return
     try {
       const nowBlob = new Blob([JSON.stringify(nowEntry)], { type: 'application/json' })
       await sb.storage.from(bucket).upload(`${prefix}/meta/now.json`, nowBlob, { upsert: true, cacheControl: 'no-cache' })
+      lastNowRecordIndexRef.current = index
+      lastNowRecordAtRef.current = Date.now()
     } catch (e) {
-      console.log('Failed to write now.json:', e)
+      console.log('Failed to write now.json (disabling future meta writes):', e)
+      disableMetaWritesRef.current = true
+      return
     }
     try {
       let history: any[] = []
@@ -377,7 +415,8 @@ export default function App(): JSX.Element {
       const histBlob = new Blob([JSON.stringify(history)], { type: 'application/json' })
       await sb.storage.from(bucket).upload(`${prefix}/meta/history.json`, histBlob, { upsert: true, cacheControl: 'no-cache' })
     } catch (e) {
-      console.log('Failed to write history.json:', e)
+      console.log('Failed to write history.json (disabling future meta writes):', e)
+      disableMetaWritesRef.current = true
     }
   }
 
@@ -388,6 +427,8 @@ export default function App(): JSX.Element {
     roomEnforcementIndexRef.current = index
     roomNowStartedAtRef.current = Date.now() - Math.floor(time * 1000)
     roomEnforcementEndAtRef.current = Date.now() + 3000
+    roomExpectedPlayingRef.current = true
+    roomExpectedFrozenElapsedRef.current = 0
 
     // Announce now playing to all
     try {
@@ -407,10 +448,11 @@ export default function App(): JSX.Element {
     const sendVerify = () => {
       try {
         const expectedElapsed = Math.max(0, Math.floor((Date.now() - roomNowStartedAtRef.current) / 1000))
+        const expectedPlaying = roomExpectedPlayingRef.current
         ch.send({
           type: 'broadcast',
           event: 'room:verify_now',
-          payload: { sender: clientIdRef.current, expectedIndex: index, expectedElapsed }
+          payload: { sender: clientIdRef.current, expectedIndex: index, expectedElapsed, expectedPlaying }
         })
       } catch {}
     }
@@ -421,7 +463,7 @@ export default function App(): JSX.Element {
       const now = Date.now()
       if (now > roomEnforcementEndAtRef.current) {
         // Write a final listeners snapshot at the end of the window
-        try { void writeListenersSnapshot() } catch {}
+        try { if (!disableMetaWritesRef.current) void writeListenersSnapshot() } catch {}
         if (roomEnforcementTimerRef.current) {
           clearInterval(roomEnforcementTimerRef.current)
           roomEnforcementTimerRef.current = null
@@ -483,6 +525,10 @@ export default function App(): JSX.Element {
   useEffect(() => { displayNameRef.current = displayName }, [displayName])
   // Keep isHost ref in sync
   useEffect(() => { isHostRef.current = isHost }, [isHost])
+  // Keep playback state ref in sync
+  useEffect(() => { isPlayingRef.current = isPlaying }, [isPlaying])
+  // Keep shuffle ref in sync
+  useEffect(() => { isShuffleRef.current = isShuffle }, [isShuffle])
 
   // Keep refs in sync to avoid stale closures in realtime handlers
   useEffect(() => { tracksRef.current = tracks }, [tracks])
@@ -1529,50 +1575,95 @@ export default function App(): JSX.Element {
     // Host polls: clients must report their current state
     ch.on('broadcast', { event: 'room:verify_now' }, ({ payload }) => {
       if (!payload) return
-      // All clients respond with their current index/time
+      // All clients respond with their current index/time/state
       const audio = audioRef.current
       const idx = currentIndexRef.current
       const t = audio ? audio.currentTime : 0
+      const playing = isPlayingRef.current
       try {
         ch.send({
           type: 'broadcast',
           event: 'client:state',
-          payload: { sender: clientIdRef.current, index: idx, time: t }
+          payload: { sender: clientIdRef.current, index: idx, time: t, isPlaying: playing }
         })
       } catch {}
 
       // Proactively self-correct during enforcement window if mismatch is detected
       const expectedIdx = Number((payload as any).expectedIndex)
       const expectedElapsed = Number((payload as any).expectedElapsed) || 0
-      if (
-        Number.isFinite(expectedIdx) &&
-        expectedIdx >= 0 &&
-        expectedIdx < tracksRef.current.length &&
-        idx !== expectedIdx
-      ) {
-        // Apply correction locally to reduce drift; host will still enforce as needed
-        void (async () => {
-          try {
-            isApplyingRemoteRef.current = true
-            await executeSelectCommand({ index: expectedIdx })
-            const el = audioRef.current
-            if (el) el.currentTime = expectedElapsed
-            await executePlayCommand({ index: expectedIdx, time: expectedElapsed })
-          } finally {
-            setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
-          }
-        })()
+      const expectedPlaying = Boolean((payload as any).expectedPlaying)
+      const withinWindow = Date.now() <= roomEnforcementEndAtRef.current
+      if (withinWindow && Number.isFinite(expectedIdx) && expectedIdx >= 0 && expectedIdx < tracksRef.current.length) {
+        const needsTrack = idx !== expectedIdx
+        const drift = Math.abs(t - expectedElapsed)
+        const needsTime = drift > 0.5 // allow small tolerance
+        const needsPlayPause = playing !== expectedPlaying
+        if (needsTrack || needsTime || needsPlayPause) {
+          void (async () => {
+            try {
+              isApplyingRemoteRef.current = true
+              if (needsTrack) await executeSelectCommand({ index: expectedIdx })
+              const el = audioRef.current
+              if (el && (needsTime || needsTrack)) el.currentTime = expectedElapsed
+              if (expectedPlaying) {
+                await executePlayCommand({ index: needsTrack ? expectedIdx : idx, time: expectedElapsed })
+              } else {
+                await executePauseCommand({ time: expectedElapsed })
+              }
+            } finally {
+              setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+            }
+          })()
+        }
       }
     })
 
-    // Clients accept targeted correction and immediately play the room's current song
+    // Host receives client states during enforcement and forces corrections
+    ch.on('broadcast', { event: 'client:state' }, ({ payload }) => {
+      if (!payload || !isHostRef.current) return
+      const clientKey = payload.sender as string
+      const clientIndex = Number(payload.index)
+      const clientTime = Number(payload.time) || 0
+      const clientPlaying = Boolean(payload.isPlaying)
+      participantNowRef.current.set(clientKey, { index: clientIndex, updatedAt: Date.now() })
+
+      // Only enforce during active window
+      if (Date.now() <= roomEnforcementEndAtRef.current && roomEnforcementIndexRef.current >= 0) {
+        const expectedIdx = roomEnforcementIndexRef.current
+        const expectedElapsed = Math.max(0, Math.floor((Date.now() - roomNowStartedAtRef.current) / 1000))
+        const expectedPlaying = roomExpectedPlayingRef.current
+        const drift = Math.abs(clientTime - expectedElapsed)
+        if (clientIndex !== expectedIdx || drift > 0.5 || clientPlaying !== expectedPlaying) {
+          try {
+            ch.send({
+              type: 'broadcast',
+              event: 'host:force_now',
+              payload: { target: clientKey, index: expectedIdx, time: expectedElapsed, isPlaying: expectedPlaying }
+            })
+          } catch {}
+        }
+      }
+    })
+
+    // Clients accept targeted correction and immediately play/pause and seek to the room's current state
     ch.on('broadcast', { event: 'host:force_now' }, async ({ payload }) => {
       if (!payload || payload.target !== clientIdRef.current) return
       try {
         isApplyingRemoteRef.current = true
         suppressEnforcementRef.current = true
-        await executeSelectCommand({ index: payload.index })
-        await executePlayCommand({ index: payload.index, time: payload.time || 0 })
+        const expectedIdx = Number(payload.index)
+        const expectedElapsed = Number(payload.time) || 0
+        const expectedPlaying = Boolean(payload.isPlaying)
+        if (expectedIdx >= 0 && expectedIdx < tracksRef.current.length) {
+          await executeSelectCommand({ index: expectedIdx })
+        }
+        const el = audioRef.current
+        if (el) el.currentTime = expectedElapsed
+        if (expectedPlaying) {
+          await executePlayCommand({ index: expectedIdx, time: expectedElapsed })
+        } else {
+          await executePauseCommand({ time: expectedElapsed })
+        }
       } finally {
         suppressEnforcementRef.current = false
         setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
@@ -1604,7 +1695,8 @@ export default function App(): JSX.Element {
       console.log('Host responding with state:', { 
         index: currentIndexRef.current, 
         time: currentTime, 
-        isPlaying: isPlaying 
+        isPlaying: isPlaying,
+        isShuffle: isShuffleRef.current
       })
       
       ch.send({
@@ -1614,6 +1706,7 @@ export default function App(): JSX.Element {
           index: currentIndexRef.current,
           time: currentTime,
           isPlaying: isPlaying,
+          isShuffle: isShuffleRef.current,
           sender: clientIdRef.current,
           target: payload.sender
         }
@@ -1624,10 +1717,11 @@ export default function App(): JSX.Element {
     ch.on('broadcast', { event: 'player:state_response' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current || payload.target !== clientIdRef.current) return
       
-      const { index, time, isPlaying: remoteIsPlaying } = payload as { 
+      const { index, time, isPlaying: remoteIsPlaying, isShuffle: remoteShuffle } = payload as { 
         index: number; 
         time: number; 
         isPlaying: boolean;
+        isShuffle?: boolean;
         sender: string;
         target: string;
       }
@@ -1644,6 +1738,9 @@ export default function App(): JSX.Element {
       // Update local state to match host
       if (index >= 0 && index < tracksRef.current.length) {
         isApplyingRemoteRef.current = true
+        if (typeof remoteShuffle === 'boolean') {
+          setIsShuffle(remoteShuffle)
+        }
         
         if (index !== currentIndexRef.current) {
           console.log('State sync: changing index from', currentIndexRef.current, 'to', index)
@@ -2300,7 +2397,8 @@ export default function App(): JSX.Element {
 
   return (
     <div className={`min-h-full flex flex-col ${theme==='dark'?'bg-black text-white':'bg-white text-black'}`}>
-      <header className="border-b border-black/10 dark:border-white/10">
+      <div className="fixed top-0 left-0 right-0 h-[15px] sm:hidden bg-white dark:bg-black z-40" />
+      <header className="sticky top-[15px] sm:top-0 z-50 bg-white dark:bg-black border-b border-black/10 dark:border-white/10">
         <div className="container-pro flex h-14 sm:h-16 items-center gap-2 sm:gap-3">
           <div className="flex items-center gap-3">
             <img src="/favicon/favicon.svg" alt="GrooveBox" className="h-5 w-5 sm:h-6 sm:w-6" />
@@ -2350,8 +2448,24 @@ export default function App(): JSX.Element {
             className="sr-only"
             onChange={(e) => onFiles(e.currentTarget.files)}
           />
+          {/* Mobile Right Controls: Participants + Menu (small screens) */}
+          <div className="relative ml-auto md:ml-0 flex items-center gap-2">
+          {/* Participants Button (small screens) */}
+          <button
+              onClick={() => setIsParticipantsOpen(!isParticipantsOpen)}
+              className="icon-btn h-8 w-8 sm:h-9 sm:w-9 relative md:hidden"
+              aria-label="View participants"
+              title={`${participants.length + 1} participants`}
+            >
+              <Users className="h-4 w-4" />
+              {participants.length > 0 && (
+                <span className="absolute -top-1 -right-1 w-4 h-4 bg-brand-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+                  {participants.length + 1}
+                </span>
+              )}
+            </button>
+
           {/* Mobile Menu Button */}
-          <div className="relative ml-auto md:ml-0">
           <button
               onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
               className="icon-btn h-8 w-8 sm:h-9 sm:w-9 flex items-center justify-center"
@@ -2402,6 +2516,87 @@ export default function App(): JSX.Element {
           </button>
                   )}
         </div>
+            </div>
+          )}
+
+          {/* Participants Dropdown (small screens) */}
+          {isParticipantsOpen && (
+            <div className="absolute top-full right-0 mt-2 w-80 bg-white dark:bg-black border border-black/10 dark:border-white/10 rounded-lg shadow-soft z-50 md:hidden">
+              <div className="p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold">Participants ({participants.length + 1})</h3>
+                  <button
+                    onClick={() => setIsParticipantsOpen(false)}
+                    className="text-black/60 dark:text-white/60 hover:text-black dark:hover:text-white"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+
+                {/* Current User (You) */}
+                <div className="mb-3">
+                  <div className="flex items-center gap-3 p-3 rounded-lg bg-gradient-to-r from-brand-500/10 to-brand-500/5 border border-brand-500/20">
+                    <div className="relative">
+                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center text-white font-semibold text-sm">
+                        {(displayName || 'Guest').charAt(0).toUpperCase()}
+                      </div>
+                      {isHost && (
+                        <div className="absolute -top-1 -right-1 w-4 h-4 bg-yellow-500 rounded-full flex items-center justify-center shadow-sm">
+                          <svg className="w-2.5 h-2.5 text-black" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M12 8L15 13.2L18 10.5L17.3 14H6.7L6 10.5L9 13.2L12 8M12 4L8.5 10L3 5L5 16H19L21 5L15.5 10L12 4Z"/>
+                          </svg>
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-black dark:text-white truncate">{displayName || 'Guest'}</span>
+                        {isHost && (
+                          <span className="px-1.5 py-0.5 bg-yellow-500/20 text-yellow-700 dark:text-yellow-400 text-[9px] font-medium rounded-full border border-yellow-500/30">
+                            HOST
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Other Participants */}
+                {participants.length > 0 ? (
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {participants.map((p, i) => (
+                      <div key={p.key + i} className="flex items-center gap-3 p-3 rounded-lg bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/20">
+                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-gray-400 to-gray-600 flex items-center justify-center text-white font-semibold text-sm">
+                          {p.name.charAt(0).toUpperCase()}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-black dark:text-white truncate">{p.name}</span>
+                            {p.isHost && (
+                              <span className="px-1.5 py-0.5 bg-yellow-500/20 text-yellow-700 dark:text-yellow-400 text-[9px] font-medium rounded-full border border-yellow-500/30">
+                                HOST
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-black/50 dark:text-white/50">Connected</p>
+                        </div>
+                        <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-4 text-black/40 dark:text-white/40">
+                    <div className="w-8 h-8 mx-auto mb-2 rounded-full bg-black/10 dark:bg-white/10 flex items-center justify-center">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                      </svg>
+                    </div>
+                    <p className="text-xs">You're the only one here</p>
+                  </div>
+                )}
+              </div>
             </div>
           )}
           </div>
@@ -2515,7 +2710,7 @@ export default function App(): JSX.Element {
 
       {/* Mobile subheader with prominent room code */}
       {inRoom && (
-        <div className="md:hidden border-b border-black/10 dark:border-white/10">
+        <div className="md:hidden sticky top-[calc(15px+3.5rem)] z-40 bg-white dark:bg-black border-b border-black/10 dark:border-white/10">
           <div className="container-pro py-2">
             <div className="flex items-center justify-between">
               <div className="flex items-baseline gap-2 min-w-0">
@@ -2742,6 +2937,15 @@ export default function App(): JSX.Element {
                   {/* Playback Controls */}
                   <div className="flex items-center justify-center gap-4 sm:gap-6">
                       <button
+                        onClick={() => enqueueGlobalCommand('shuffle_toggle', { enabled: !isShuffleRef.current })}
+                        disabled={isLoadingLibrary || tracks.length === 0}
+                        className={`icon-btn h-10 w-10 sm:h-12 sm:w-12 rounded-full backdrop-blur-sm border border-white/20 dark:border-white/10 transition-all duration-200 ${isShuffle ? 'bg-brand-500/20 text-brand-600 dark:text-brand-400' : 'bg-white/50 dark:bg-black/50 hover:bg-white/70 dark:hover:bg-black/70'}`}
+                        aria-label="Toggle shuffle"
+                        title="Shuffle"
+                      >
+                        <Shuffle className="h-4 w-4 sm:h-5 sm:w-5" />
+                      </button>
+                      <button
                         onClick={goPrevious}
                         disabled={!hasPrevious || isLoadingLibrary}
                       className="icon-btn h-12 w-12 sm:h-14 sm:w-14 lg:h-16 lg:w-16 rounded-full bg-white/50 dark:bg-black/50 backdrop-blur-sm border border-white/20 dark:border-white/10 hover:bg-white/70 dark:hover:bg-black/70 transition-all duration-200 disabled:opacity-50"
@@ -2837,12 +3041,27 @@ export default function App(): JSX.Element {
                   onLoadedMetadata={onLoadedMetadata}
                   onTimeUpdate={onTimeUpdate}
                   onEnded={() => {
-                    if (hasNext) {
-                      goNext()
-                    } else {
+                    if (tracksRef.current.length === 0) {
                       setIsPlaying(false)
                       setCurrentTime(0)
                       shouldAutoplayRef.current = false
+                      return
+                    }
+                    // Auto-advance: follow shuffle if enabled, else sequential next
+                    if (isShuffleRef.current) {
+                      const total = tracksRef.current.length
+                      if (total <= 1) {
+                        setIsPlaying(false)
+                        setCurrentTime(0)
+                        shouldAutoplayRef.current = false
+                        return
+                      }
+                      const from = currentIndexRef.current
+                      let nextIndex = Math.floor(Math.random() * (total - 1))
+                      if (nextIndex >= from) nextIndex += 1
+                      enqueueGlobalCommand('next', { fromIndex: from, nextIndex })
+                    } else {
+                      enqueueGlobalCommand('next', { fromIndex: currentIndexRef.current })
                     }
                   }}
                   className="hidden"
