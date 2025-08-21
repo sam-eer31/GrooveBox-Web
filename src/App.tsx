@@ -309,14 +309,20 @@ export default function App(): JSX.Element {
   }
 
   const executeNextCommand = async (payload: any) => {
-    const nextIndex = Math.min(tracksRef.current.length - 1, Math.max(0, currentIndexRef.current + 1))
+    const total = tracksRef.current.length
+    if (total === 0) return
+    const fromIndex = typeof payload?.fromIndex === 'number' ? payload.fromIndex : currentIndexRef.current
+    const nextIndex = (fromIndex + 1 + total) % total
     setCurrentIndex(nextIndex)
     setCurrentTime(0)
     shouldAutoplayRef.current = true
   }
 
   const executePreviousCommand = async (payload: any) => {
-    const prevIndex = Math.max(0, Math.min(tracksRef.current.length - 1, currentIndexRef.current - 1))
+    const total = tracksRef.current.length
+    if (total === 0) return
+    const fromIndex = typeof payload?.fromIndex === 'number' ? payload.fromIndex : currentIndexRef.current
+    const prevIndex = (fromIndex - 1 + total) % total
     setCurrentIndex(prevIndex)
     setCurrentTime(0)
     shouldAutoplayRef.current = true
@@ -771,6 +777,44 @@ export default function App(): JSX.Element {
           const payload = uploadedTracks.map(t => ({ path: t.path, name: cleanFileName(t.name) }))
           channelRef.current.send({ type: 'broadcast', event: 'playlist:add', payload: { items: payload, sender: clientIdRef.current } })
         }
+        // After sending playlist:add, reload canonical order for uploader as well
+        try {
+          setIsLoadingLibrary(true)
+          const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
+          const metaPrefix = `rooms/${roomCode}/meta`
+          let canonicalOrder: Array<{ path: string; name: string }> | null = null
+          const { data: orderFile } = await supabase.storage.from(bucket).download(`${metaPrefix}/tracks.json`)
+          if (orderFile) {
+            const text = await orderFile.text()
+            const parsed = JSON.parse(text)
+            if (Array.isArray(parsed)) canonicalOrder = parsed
+          }
+          const tracksPrefix = `rooms/${roomCode}/tracks`
+          const loaded: Track[] = []
+          const pushTrack = async (fileName: string, display?: string) => {
+            const lower = (fileName || '').toLowerCase()
+            if (!/\.(mp3|wav|m4a|aac|flac|ogg|oga|opus)$/i.test(lower)) return
+            const path = `${tracksPrefix}/${fileName}`
+            const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
+            const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl
+            if (!url) return
+            loaded.push({ id: path, url, name: display || fileName, path })
+          }
+          if (canonicalOrder && canonicalOrder.length > 0) {
+            for (const it of canonicalOrder) {
+              const parts = (it.path || '').split('/')
+              const fileName = parts[parts.length - 1]
+              if (fileName) await pushTrack(fileName, it.name)
+            }
+          }
+          setTracks(loaded)
+          setCurrentIndex(loaded.length > 0 ? 0 : -1)
+          setCurrentTime(0)
+        } catch (e) {
+          console.error('Failed to reload canonical playlist order after upload:', e)
+        } finally {
+          setIsLoadingLibrary(false)
+        }
       }
 
       // All uploads completed successfully (if not cancelled)
@@ -1024,20 +1068,18 @@ export default function App(): JSX.Element {
 
   const currentTrack = tracks[currentIndex] ?? null
   const fileName = useMemo(() => currentTrack?.name ?? 'No track selected', [currentTrack])
-
-  const hasPrevious = currentIndex > 0
-  const hasNext = currentIndex >= 0 && currentIndex < tracks.length - 1
-
+  
+  const hasPrevious = tracks.length > 0
+  const hasNext = tracks.length > 0
+  
   const goPrevious = () => {
-    const hasPrev = currentIndexRef.current > 0
-    if (!hasPrev) return
-    enqueueGlobalCommand('previous', {})
+    if (tracksRef.current.length === 0) return
+    enqueueGlobalCommand('previous', { fromIndex: currentIndexRef.current })
   }
-
+  
   const goNext = () => {
-    const hasN = currentIndexRef.current >= 0 && currentIndexRef.current < tracksRef.current.length - 1
-    if (!hasN) return
-    enqueueGlobalCommand('next', {})
+    if (tracksRef.current.length === 0) return
+    enqueueGlobalCommand('next', { fromIndex: currentIndexRef.current })
   }
 
   // When metadata loads for a new track, autoplay if flagged
@@ -1401,61 +1443,44 @@ export default function App(): JSX.Element {
 
     ch.on('broadcast', { event: 'playlist:add' }, async ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
-      const sb = supabase
-      if (!sb) return
-      const items = ((payload.items as Array<{ path: string; name: string }>) || []).filter(it => {
-        const lower = (it.name || '').toLowerCase()
-        if (lower.endsWith('.json')) return false
-        return /(\.mp3|\.wav|\.m4a|\.aac|\.flac|\.ogg|\.oga|\.opus)$/i.test(lower)
-      })
-      const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
-      const added: Track[] = []
-      for (const it of items) {
-        const tracksPrefix = `rooms/${roomCode}/tracks`
-        const normalizedPath = it.path && it.path.startsWith(`${tracksPrefix}/`) ? it.path : `${tracksPrefix}/${encodeURIComponent(it.name)}`
-        const { data: signed } = await sb.storage.from(bucket).createSignedUrl(normalizedPath, 60 * 60 * 24 * 7)
-        const url = signed?.signedUrl || sb.storage.from(bucket).getPublicUrl(normalizedPath).data.publicUrl
-        if (!url) continue
-        added.push({ id: normalizedPath, url, name: it.name, path: normalizedPath })
-      }
-              if (added.length > 0) {
-          setTracks(prev => {
-            const newTracks = [...prev, ...added]
-            
-            // Check if we have pending state sync that we can now apply
-            if (pendingRemotePlayRef.current && newTracks.length > 0) {
-              const { index, time } = pendingRemotePlayRef.current
-              if (index >= 0 && index < newTracks.length) {
-                console.log('Tracks loaded, applying pending state sync:', { index, time })
-                setTimeout(() => {
-                  setCurrentIndex(index)
-                  setCurrentTime(time)
-                  shouldAutoplayRef.current = true
-                  pendingRemotePlayRef.current = null
-                  
-                  // Try to start playback if it was supposed to be playing
-                  const audio = audioRef.current
-                  if (audio && shouldAutoplayRef.current) {
-                    setTimeout(async () => {
-                      try {
-                        audio.currentTime = time
-                        await audio.play()
-                        setIsPlaying(true)
-                        console.log('Pending state sync: playback started')
-                      } catch (e) {
-                        console.log('Pending state sync play failed:', e)
-                        setPlaybackBlocked(true)
-                      }
-                    }, 100)
-                  }
-                }, 100)
-              }
-            }
-            
-            return newTracks
-          })
-          addToast(`${added.length} track(s) added`, 'success')
+      // Instead of appending, reload canonical order from meta/tracks.json
+      try {
+        setIsLoadingLibrary(true)
+        const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
+        const metaPrefix = `rooms/${roomCode}/meta`
+        let canonicalOrder: Array<{ path: string; name: string }> | null = null
+        const { data: orderFile } = await supabase.storage.from(bucket).download(`${metaPrefix}/tracks.json`)
+        if (orderFile) {
+          const text = await orderFile.text()
+          const parsed = JSON.parse(text)
+          if (Array.isArray(parsed)) canonicalOrder = parsed
         }
+        const tracksPrefix = `rooms/${roomCode}/tracks`
+        const loaded: Track[] = []
+        const pushTrack = async (fileName: string, display?: string) => {
+          const lower = (fileName || '').toLowerCase()
+          if (!/\.(mp3|wav|m4a|aac|flac|ogg|oga|opus)$/i.test(lower)) return
+          const path = `${tracksPrefix}/${fileName}`
+          const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
+          const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl
+          if (!url) return
+          loaded.push({ id: path, url, name: display || fileName, path })
+        }
+        if (canonicalOrder && canonicalOrder.length > 0) {
+          for (const it of canonicalOrder) {
+            const parts = (it.path || '').split('/')
+            const fileName = parts[parts.length - 1]
+            if (fileName) await pushTrack(fileName, it.name)
+          }
+        }
+        setTracks(loaded)
+        setCurrentIndex(loaded.length > 0 ? 0 : -1)
+        setCurrentTime(0)
+      } catch (e) {
+        console.error('Failed to reload canonical playlist order:', e)
+      } finally {
+        setIsLoadingLibrary(false)
+      }
     })
 
     // Handle commands queued by any client
@@ -1475,35 +1500,9 @@ export default function App(): JSX.Element {
     // Handle executed commands from any client
     ch.on('broadcast', { event: 'player:command_executed' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
-      
       const { command, payload: cmdPayload } = payload
       console.log(`Received executed command: ${command}`, cmdPayload)
-      
-      // Apply the command locally (but don't re-broadcast)
-      isApplyingRemoteRef.current = true
-      
-      switch (command) {
-        case 'play':
-          executePlayCommand(cmdPayload)
-          break
-        case 'pause':
-          executePauseCommand(cmdPayload)
-          break
-        case 'seek':
-          executeSeekCommand(cmdPayload)
-          break
-        case 'next':
-          executeNextCommand(cmdPayload)
-          break
-        case 'previous':
-          executePreviousCommand(cmdPayload)
-          break
-        case 'select':
-          executeSelectCommand(cmdPayload)
-          break
-      }
-      
-      setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+      // No-op: execution already handled via queue on all clients
     })
 
 
