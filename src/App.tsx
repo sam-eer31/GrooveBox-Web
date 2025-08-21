@@ -316,6 +316,10 @@ export default function App(): JSX.Element {
     setCurrentIndex(nextIndex)
     setCurrentTime(0)
     shouldAutoplayRef.current = true
+    // Host triggers explicit play so enforcement always runs for 3s
+    if (isHostRef.current) {
+      enqueueGlobalCommand('play', { index: nextIndex, time: 0 })
+    }
   }
 
   const executePreviousCommand = async (payload: any) => {
@@ -326,6 +330,10 @@ export default function App(): JSX.Element {
     setCurrentIndex(prevIndex)
     setCurrentTime(0)
     shouldAutoplayRef.current = true
+    // Host triggers explicit play so enforcement always runs for 3s
+    if (isHostRef.current) {
+      enqueueGlobalCommand('play', { index: prevIndex, time: 0 })
+    }
   }
 
   const executeSelectCommand = async (payload: any) => {
@@ -396,7 +404,19 @@ export default function App(): JSX.Element {
       roomEnforcementTimerRef.current = null
     }
 
-    // Poll all clients to report state and enforce mismatches for 3 seconds
+    const sendVerify = () => {
+      try {
+        const expectedElapsed = Math.max(0, Math.floor((Date.now() - roomNowStartedAtRef.current) / 1000))
+        ch.send({
+          type: 'broadcast',
+          event: 'room:verify_now',
+          payload: { sender: clientIdRef.current, expectedIndex: index, expectedElapsed }
+        })
+      } catch {}
+    }
+
+    // Immediate verify ping, then poll clients every 250ms within the 3s window
+    sendVerify()
     roomEnforcementTimerRef.current = setInterval(() => {
       const now = Date.now()
       if (now > roomEnforcementEndAtRef.current) {
@@ -408,14 +428,8 @@ export default function App(): JSX.Element {
         }
         return
       }
-      try {
-        ch.send({
-          type: 'broadcast',
-          event: 'room:verify_now',
-          payload: { sender: clientIdRef.current, expectedIndex: index }
-        })
-      } catch {}
-    }, 400)
+      sendVerify()
+    }, 250)
   }
 
   // Persist snapshot of what each participant is listening to (host only)
@@ -1526,27 +1540,28 @@ export default function App(): JSX.Element {
           payload: { sender: clientIdRef.current, index: idx, time: t }
         })
       } catch {}
-    })
 
-    // Host receives client states during enforcement and forces corrections
-    ch.on('broadcast', { event: 'client:state' }, ({ payload }) => {
-      if (!payload || !isHost) return
-      const clientKey = payload.sender as string
-      const clientIndex = Number(payload.index)
-      participantNowRef.current.set(clientKey, { index: clientIndex, updatedAt: Date.now() })
-
-      // Only enforce during active window
-      if (Date.now() <= roomEnforcementEndAtRef.current && roomEnforcementIndexRef.current >= 0) {
-        if (clientIndex !== roomEnforcementIndexRef.current) {
-          const elapsedSec = Math.max(0, Math.floor((Date.now() - roomNowStartedAtRef.current) / 1000))
+      // Proactively self-correct during enforcement window if mismatch is detected
+      const expectedIdx = Number((payload as any).expectedIndex)
+      const expectedElapsed = Number((payload as any).expectedElapsed) || 0
+      if (
+        Number.isFinite(expectedIdx) &&
+        expectedIdx >= 0 &&
+        expectedIdx < tracksRef.current.length &&
+        idx !== expectedIdx
+      ) {
+        // Apply correction locally to reduce drift; host will still enforce as needed
+        void (async () => {
           try {
-            ch.send({
-              type: 'broadcast',
-              event: 'host:force_now',
-              payload: { target: clientKey, index: roomEnforcementIndexRef.current, time: elapsedSec }
-            })
-          } catch {}
-        }
+            isApplyingRemoteRef.current = true
+            await executeSelectCommand({ index: expectedIdx })
+            const el = audioRef.current
+            if (el) el.currentTime = expectedElapsed
+            await executePlayCommand({ index: expectedIdx, time: expectedElapsed })
+          } finally {
+            setTimeout(() => { isApplyingRemoteRef.current = false }, 0)
+          }
+        })()
       }
     })
 
@@ -2287,28 +2302,43 @@ export default function App(): JSX.Element {
     <div className={`min-h-full flex flex-col ${theme==='dark'?'bg-black text-white':'bg-white text-black'}`}>
       <header className="border-b border-black/10 dark:border-white/10">
         <div className="container-pro flex h-14 sm:h-16 items-center gap-2 sm:gap-3">
-          <div className="flex items-center gap-3 flex-1">
+          <div className="flex items-center gap-3">
             <img src="/favicon/favicon.svg" alt="GrooveBox" className="h-5 w-5 sm:h-6 sm:w-6" />
             <div className="min-w-0">
               <h1 className="text-sm sm:text-base md:text-lg font-semibold tracking-tight">GrooveBox</h1>
               <p className="text-[10px] sm:text-[11px] text-black/60 dark:text-white/60 truncate">
-                Room <span className="font-mono px-1 py-0.5 rounded-md bg-black/5 dark:bg-white/10">{roomCode}</span>
+                {isHost && <span className="text-brand-500">Host</span>}
+                {roomTitle && <span className="ml-2">· {roomTitle}</span>}
+              </p>
+            </div>
+          </div>
+
+          {/* Centered Room Info (Desktop and larger) */}
+          <div className="hidden md:flex flex-1 items-center justify-center">
+            {inRoom && (
+              <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border border-black/10 dark:border-white/10 bg-gradient-to-br from-white/70 via-white/40 to-transparent dark:from-black/70 dark:via-black/40 dark:to-transparent shadow-sm backdrop-blur">
+                <span className="text-xs text-black/60 dark:text-white/60">{roomTitle || 'Room'}</span>
+                <span className="font-mono text-sm sm:text-base px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10">{roomCode}</span>
                 <button
                   onClick={copyRoomCode}
-                  className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
                   aria-label="Copy room code"
                   title="Copy room code"
                 >
                   {isCodeCopied ? (
-                    <Check className="w-3 h-3 text-green-500" />
+                    <>
+                      <Check className="w-3.5 h-3.5 text-green-500" />
+                      <span className="text-xs text-green-600 dark:text-green-400">Copied</span>
+                    </>
                   ) : (
-                    <Copy className="w-3 h-3 text-black/60 dark:text-white/60" />
+                    <>
+                      <Copy className="w-3.5 h-3.5 text-black/60 dark:text-white/60" />
+                      <span className="text-xs text-black/60 dark:text-white/60">Copy</span>
+                    </>
                   )}
                 </button>
-                {isHost && <span className="ml-2 text-brand-500">Host</span>}
-                {roomTitle && <span className="ml-2">· {roomTitle}</span>}
-              </p>
-            </div>
+              </div>
+            )}
           </div>
 
           <input
@@ -2321,7 +2351,7 @@ export default function App(): JSX.Element {
             onChange={(e) => onFiles(e.currentTarget.files)}
           />
           {/* Mobile Menu Button */}
-          <div className="relative">
+          <div className="relative ml-auto md:ml-0">
           <button
               onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
               className="icon-btn h-8 w-8 sm:h-9 sm:w-9 flex items-center justify-center"
@@ -2377,7 +2407,7 @@ export default function App(): JSX.Element {
           </div>
           
           {/* Participants Button */}
-          <div className="relative">
+          <div className="relative hidden md:block">
           <button
               onClick={() => setIsParticipantsOpen(!isParticipantsOpen)}
               className="icon-btn h-8 w-8 sm:h-9 sm:w-9 relative"
@@ -2391,7 +2421,6 @@ export default function App(): JSX.Element {
                 </span>
               )}
           </button>
-            
             {/* Participants Dropdown */}
             {isParticipantsOpen && (
               <div className="participants-dropdown absolute top-full right-0 mt-2 w-80 bg-white dark:bg-black border border-black/10 dark:border-white/10 rounded-lg shadow-soft z-50">
@@ -2432,9 +2461,7 @@ export default function App(): JSX.Element {
                       </span>
                     )}
                   </div>
-                        <p className="text-[10px] text-black/50 dark:text-white/50">You</p>
                 </div>
-                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
               </div>
             </div>
 
@@ -2485,6 +2512,37 @@ export default function App(): JSX.Element {
           </button>
         </div>
       </header>
+
+      {/* Mobile subheader with prominent room code */}
+      {inRoom && (
+        <div className="md:hidden border-b border-black/10 dark:border-white/10">
+          <div className="container-pro py-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-baseline gap-2 min-w-0">
+                <span className="text-[11px] text-black/60 dark:text-white/60 truncate">{roomTitle || 'Room'}</span>
+                <span className="font-mono text-sm px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10">{roomCode}</span>
+              </div>
+              <button
+                onClick={copyRoomCode}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+                aria-label="Copy room code"
+              >
+                {isCodeCopied ? (
+                  <>
+                    <Check className="w-4 h-4 text-green-500" />
+                    <span className="text-xs text-green-600 dark:text-green-400">Copied</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-4 h-4 text-black/60 dark:text-white/60" />
+                    <span className="text-xs text-black/60 dark:text-white/60">Copy</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="flex-1">
         <div className="container-pro py-4 sm:py-6" style={{maxWidth: '1920px'}}>
