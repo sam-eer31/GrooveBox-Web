@@ -1,90 +1,36 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import GlobalTracker from './components/GlobalTracker'
 import { Music, Sun, Moon, Upload as UploadIcon, Power, LogOut, Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Users, Menu, X, Copy, Check, Shuffle } from 'lucide-react'
 import { supabase } from './lib/supabaseClient'
+import Header from './components/Header';
+import Playlist from './components/Playlist';
+import PlayerControls from './components/PlayerControls';
+import Toasts from './components/Toasts';
+import UploadModal from './components/UploadModal';
+import UploadProgressModal from './components/UploadProgressModal';
+import ParticipantsDropdown from './components/ParticipantsDropdown';
+import type { Track, UploadProgress, Toast } from './types';
+import { 
+  formatTime, 
+  cleanFileName, 
+  deriveDisplayNameFromObjectName, 
+  formatFileSize, 
+  formatSpeed, 
+  sortTracksAlphabetically, 
+  logSyncEvent, 
+  logSupabaseUploadError 
+} from './utils';
+import { useUpload } from './hooks/useUpload';
+import { useRoomManagement } from './hooks/useRoomManagement';
+import { useAudioPlayer } from './hooks/useAudioPlayer';
+import { useRoomEnforcement } from './hooks/useRoomEnforcement';
+import { useSyncManagement } from './hooks/useSyncManagement';
+import { useBackgroundAudio } from './hooks/useBackgroundAudio';
+import { useCommandQueue } from './hooks/useCommandQueue';
 
-type Track = {
-  id: string
-  file?: File
-  url: string
-  name: string
-  path: string
-}
 
-type UploadProgress = {
-  fileName: string
-  progress: number
-  uploaded: number
-  total: number
-  speed: number
-  status: 'pending' | 'uploading' | 'completed' | 'error'
-  error?: string
-}
 
-type Toast = {
-  id: string
-  message: string
-  type: 'success' | 'info' | 'warning' | 'error'
-  duration?: number
-}
 
-const ACCEPTED_TYPES = [
-  'audio/mpeg', // mp3
-  'audio/mp3',
-  'audio/wav',
-  'audio/x-wav',
-  'audio/wave',
-  'audio/aac',
-  'audio/mp4', // m4a subtype on some platforms
-  'audio/m4a',
-  'audio/x-m4a'
-]
-
-function formatTime(seconds: number): string {
-  if (!isFinite(seconds)) return '0:00'
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  return `${m}:${s.toString().padStart(2, '0')}`
-}
-
-function cleanFileName(fileName: string): string {
-  // Preserve known audio extension, but strip ALL special characters from the base name
-  const trimmed = (fileName || '').trim()
-  const lastDot = trimmed.lastIndexOf('.')
-  const rawName = lastDot > 0 ? trimmed.slice(0, lastDot) : trimmed
-  const rawExt = lastDot > 0 ? trimmed.slice(lastDot + 1).toLowerCase() : ''
-
-  // Remove everything that's not a letter, number, or space from the base name
-  let base = rawName.replace(/[^a-zA-Z0-9 ]+/g, '')
-  base = base.replace(/\s+/g, ' ').trim()
-  if (!base) base = 'track'
-
-  // Keep only a safe, known extension set
-  const allowedExts = new Set(['mp3', 'wav', 'm4a', 'aac'])
-  const ext = allowedExts.has(rawExt) ? rawExt : ''
-
-  return ext ? `${base}.${ext}` : base
-}
-
-function deriveDisplayNameFromObjectName(objectName: string): string {
-  // Decode URL-encoded filename first
-  const decodedName = decodeURIComponent(objectName)
-  // Matches UUID prefixes we add during upload: <uuid>-<original-name>
-  const uuidPrefixPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}-(.+)$/
-  const match = decodedName.match(uuidPrefixPattern)
-  return match ? match[1] : decodedName
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
-}
-
-function formatSpeed(bytesPerSecond: number): string {
-  return formatFileSize(bytesPerSecond) + '/s'
-}
 
 function useToasts() {
   const addToast = (message: string, type: Toast['type'] = 'info', duration: number = 3000) => {
@@ -97,9 +43,13 @@ function useToasts() {
   return { addToast }
 }
 
+
+
+
+
 export default function App(): JSX.Element {
   const [roomCode, setRoomCode] = useState<string>('')
-  const [joinCodeInput, setJoinCodeInput] = useState<string>('')
+
   const [inRoom, setInRoom] = useState<boolean>(false)
   const [isHost, setIsHost] = useState<boolean>(false)
   const [tracks, setTracks] = useState<Track[]>([])
@@ -109,23 +59,14 @@ export default function App(): JSX.Element {
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [volume, setVolume] = useState(1)
-  const [isUploading, setIsUploading] = useState(false)
-  const [uploadProgress, setUploadProgress] = useState<UploadProgress[]>([])
-  const [totalUploadSize, setTotalUploadSize] = useState(0)
-  const [totalUploaded, setTotalUploaded] = useState(0)
   const [isLoadingLibrary, setIsLoadingLibrary] = useState(false)
   const [displayName, setDisplayName] = useState<string>('')
-  const [createName, setCreateName] = useState<string>('')
-  const [joinName, setJoinName] = useState<string>('')
   const [roomTitle, setRoomTitle] = useState<string>('')
-  const [roomTitleInput, setRoomTitleInput] = useState<string>('')
   const [homeTab, setHomeTab] = useState<'create' | 'join'>('create')
   const [participants, setParticipants] = useState<Array<{ key: string; name: string; isHost?: boolean }>>([])
   const [toasts, setToasts] = useState<Toast[]>([])
   const [playbackBlocked, setPlaybackBlocked] = useState<boolean>(false)
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('groovebox_theme') as 'light' | 'dark') || 'dark')
-  const [isUploadOpen, setIsUploadOpen] = useState<boolean>(false)
-  const [isProgressOpen, setIsProgressOpen] = useState<boolean>(false)
   const [isParticipantsOpen, setIsParticipantsOpen] = useState<boolean>(false)
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false)
   const [isRestoringSession, setIsRestoringSession] = useState<boolean>(true)
@@ -133,7 +74,11 @@ export default function App(): JSX.Element {
   const [isCodeCopied, setIsCodeCopied] = useState<boolean>(false)
   const [isShuffle, setIsShuffle] = useState<boolean>(false)
   const mobileMenuRef = useRef<HTMLDivElement>(null)
-  
+  const [waitingForSync, setWaitingForSync] = useState(false);
+  const [syncRetryCount, setSyncRetryCount] = useState(0);
+  const [pendingSyncState, setPendingSyncState] = useState<any>(null);
+  const [isOutOfSync, setIsOutOfSync] = useState(false);
+
   // Close participants dropdown and mobile menu when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -150,38 +95,25 @@ export default function App(): JSX.Element {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [isParticipantsOpen, isMobileMenuOpen])
 
-  const audioRef = useRef<HTMLAudioElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const shouldAutoplayRef = useRef<boolean>(false)
   const channelRef = useRef<ReturnType<NonNullable<typeof supabase>['channel']> | null>(null)
   const clientIdRef = useRef<string>('')
   const isApplyingRemoteRef = useRef<boolean>(false)
+  
+
   const pendingRemotePlayRef = useRef<{ index: number; time: number } | null>(null)
   const tracksRef = useRef<Track[]>([])
   const currentIndexRef = useRef<number>(-1)
-  const activeXhrsRef = useRef<XMLHttpRequest[]>([])
-  const uploadCancelRef = useRef<boolean>(false)
-  const uploadedPathsRef = useRef<string[]>([])
+
   const clientIdToNameRef = useRef<Map<string, string>>(new Map())
   const displayNameRef = useRef<string>('')
   const pendingSelfNameRef = useRef<string | null>(null)
 
   // Host authority and enforcement helpers
   const isHostRef = useRef<boolean>(false)
-  const roomEnforcementTimerRef = useRef<NodeJS.Timeout | null>(null)
-  const roomEnforcementEndAtRef = useRef<number>(0)
-  const roomEnforcementIndexRef = useRef<number>(-1)
-  const roomNowStartedAtRef = useRef<number>(0)
   const participantNowRef = useRef<Map<string, { index: number; updatedAt: number }>>(new Map())
-  const suppressEnforcementRef = useRef<boolean>(false)
-  const lastListenersWriteAtRef = useRef<number>(0)
   const isPlayingRef = useRef<boolean>(false)
-  const roomExpectedPlayingRef = useRef<boolean>(true)
-  const roomExpectedFrozenElapsedRef = useRef<number>(0)
-  // Meta write guards
-  const disableMetaWritesRef = useRef<boolean>(false)
-  const lastNowRecordIndexRef = useRef<number>(-1)
-  const lastNowRecordAtRef = useRef<number>(0)
   const isShuffleRef = useRef<boolean>(false)
 
   // Keep refs synchronized with React state
@@ -190,88 +122,6 @@ export default function App(): JSX.Element {
   useEffect(() => { currentIndexRef.current = currentIndex }, [currentIndex])
   useEffect(() => { isPlayingRef.current = isPlaying }, [isPlaying])
   useEffect(() => { displayNameRef.current = displayName }, [displayName])
-
-  // Global command queue for room-wide synchronization
-  const globalCommandQueueRef = useRef<Array<{ command: string; payload: any; sender: string; timestamp: number }>>([])
-  const isProcessingGlobalQueueRef = useRef<boolean>(false)
-
-  const processGlobalQueue = async () => {
-    if (isProcessingGlobalQueueRef.current) return
-    
-    if (globalCommandQueueRef.current.length === 0) return
-    
-    isProcessingGlobalQueueRef.current = true
-    
-    while (globalCommandQueueRef.current.length > 0) {
-      const { command, payload, sender, timestamp } = globalCommandQueueRef.current.shift()!
-      
-      // Skip old commands (older than 5 seconds)
-      if (Date.now() - timestamp > 5000) continue
-      
-      try {
-        console.log(`Processing global command: ${command} from ${sender}`, payload)
-        
-        // Execute the command locally
-        switch (command) {
-          case 'play':
-            await executePlayCommand(payload)
-            break
-          case 'pause':
-            await executePauseCommand(payload)
-            break
-          case 'seek':
-            await executeSeekCommand(payload)
-            break
-          case 'next':
-            await executeNextCommand(payload)
-            break
-          case 'previous':
-            await executePreviousCommand(payload)
-            break
-          case 'shuffle_toggle':
-            await executeShuffleToggleCommand(payload)
-            break
-          case 'shuffle_next':
-            await executeShuffleNextCommand(payload)
-            break
-          case 'select':
-            await executeSelectCommand(payload)
-            break
-        }
-        
-        // Broadcast the executed command to all clients
-        if (channelRef.current) {
-          channelRef.current.send({
-            type: 'broadcast',
-            event: 'player:command_executed',
-            payload: { command, payload, sender, timestamp }
-          })
-        }
-        
-      } catch (error) {
-        console.warn(`Global command ${command} failed:`, error)
-      }
-    }
-    
-    isProcessingGlobalQueueRef.current = false
-  }
-
-  const enqueueGlobalCommand = (command: string, payload: any) => {
-    const timestamp = Date.now()
-    globalCommandQueueRef.current.push({ command, payload, sender: clientIdRef.current, timestamp })
-    
-    // Broadcast to all clients to add to their queues
-    if (channelRef.current) {
-      channelRef.current.send({
-        type: 'broadcast',
-        event: 'player:command_queued',
-        payload: { command, payload, sender: clientIdRef.current, timestamp }
-      })
-    }
-    
-    // Process queue immediately
-    processGlobalQueue()
-  }
 
   const copyRoomCode = async () => {
     try {
@@ -283,233 +133,7 @@ export default function App(): JSX.Element {
     }
   }
 
-  // Command execution handlers (same for all clients)
-  const executePlayCommand = async (payload: any) => {
-    const { index, time } = payload
-    const audio = audioRef.current
-    if (!audio) return
-    
-    if (index !== currentIndexRef.current) {
-      setCurrentIndex(index)
-      setCurrentTime(time)
-      shouldAutoplayRef.current = true
-      await new Promise(r => setTimeout(r, 100))
-    }
-    
-    audio.currentTime = time
-    await audio.play()
-    setIsPlaying(true)
 
-    // Host records now-playing + kicks off 3s enforcement window
-    if (isHostRef.current && !suppressEnforcementRef.current) {
-      try {
-        await recordRoomNowAndHistory(index)
-        startNowEnforcement(index, time)
-      } catch (e) {
-        console.log('record/enforce error:', e)
-      }
-    }
-  }
-
-  const executePauseCommand = async (payload: any) => {
-    const { time } = payload
-    const audio = audioRef.current
-    if (audio) {
-      audio.pause()
-      audio.currentTime = time
-    }
-    setIsPlaying(false)
-    shouldAutoplayRef.current = false
-    setCurrentTime(time)
-
-    // Host also enforces paused state for 3s window
-    if (isHostRef.current && !suppressEnforcementRef.current) {
-      try {
-        startNowEnforcement(currentIndexRef.current, time, false)
-      } catch (e) {
-        console.log('pause enforce error:', e)
-      }
-    }
-  }
-
-  const executeSeekCommand = async (payload: any) => {
-    const { time } = payload
-    const audio = audioRef.current
-    if (audio) audio.currentTime = time
-    setCurrentTime(time)
-  }
-
-  const executeNextCommand = async (payload: any) => {
-    const total = tracksRef.current.length
-    if (total === 0) return
-    const fromIndex = typeof payload?.fromIndex === 'number' ? payload.fromIndex : currentIndexRef.current
-    // If shuffle is active and a specific nextIndex is provided, honor it; otherwise compute sequential
-    const providedIndex = typeof payload?.nextIndex === 'number' ? payload.nextIndex : null
-    const nextIndex = providedIndex !== null ? providedIndex : (fromIndex + 1 + total) % total
-    setCurrentIndex(nextIndex)
-    setCurrentTime(0)
-    shouldAutoplayRef.current = true
-    // Host triggers explicit play so enforcement always runs for 3s
-    if (isHostRef.current) {
-      enqueueGlobalCommand('play', { index: nextIndex, time: 0 })
-    }
-  }
-
-  const executePreviousCommand = async (payload: any) => {
-    const total = tracksRef.current.length
-    if (total === 0) return
-    const fromIndex = typeof payload?.fromIndex === 'number' ? payload.fromIndex : currentIndexRef.current
-    const providedIndex = typeof payload?.prevIndex === 'number' ? payload.prevIndex : null
-    const prevIndex = providedIndex !== null ? providedIndex : (fromIndex - 1 + total) % total
-    setCurrentIndex(prevIndex)
-    setCurrentTime(0)
-    shouldAutoplayRef.current = true
-    // Host triggers explicit play so enforcement always runs for 3s
-    if (isHostRef.current) {
-      enqueueGlobalCommand('play', { index: prevIndex, time: 0 })
-    }
-  }
-
-  const executeSelectCommand = async (payload: any) => {
-    const { index } = payload
-    setCurrentIndex(index)
-    setCurrentTime(0)
-    shouldAutoplayRef.current = true
-  }
-
-  // Shuffle command handlers
-  const executeShuffleToggleCommand = async (payload: any) => {
-    const { enabled } = payload as { enabled: boolean }
-    setIsShuffle(Boolean(enabled))
-  }
-
-  const executeShuffleNextCommand = async (payload: any) => {
-    const { nextIndex } = payload as { nextIndex: number }
-    if (typeof nextIndex !== 'number') return
-    await executeNextCommand({ fromIndex: currentIndexRef.current, nextIndex })
-  }
-
-  // Persist the room's now playing and append history (host only)
-  const recordRoomNowAndHistory = async (index: number) => {
-    const sb = supabase
-    if (!sb || !roomCode) return
-    const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
-    const prefix = `rooms/${roomCode}`
-    const track = tracksRef.current[index]
-    const nowEntry = {
-      index,
-      trackId: track?.id || track?.path || null,
-      trackName: track?.name || null,
-      startedAt: new Date().toISOString(),
-      startedBy: displayNameRef.current || 'Host',
-    }
-    // Skip if meta writes were disabled due to previous failures
-    if (disableMetaWritesRef.current) return
-    // Throttle: only once per index within 3s window
-    if (lastNowRecordIndexRef.current === index && Date.now() - lastNowRecordAtRef.current < 3000) return
-    try {
-      const nowBlob = new Blob([JSON.stringify(nowEntry)], { type: 'application/json' })
-      await sb.storage.from(bucket).upload(`${prefix}/meta/now.json`, nowBlob, { upsert: true, cacheControl: 'no-cache' })
-      lastNowRecordIndexRef.current = index
-      lastNowRecordAtRef.current = Date.now()
-    } catch (e) {
-      console.log('Failed to write now.json (disabling future meta writes):', e)
-      disableMetaWritesRef.current = true
-      return
-    }
-    try {
-      let history: any[] = []
-      try {
-        const { data } = await sb.storage.from(bucket).download(`${prefix}/meta/history.json`)
-        if (data) {
-          const text = await data.text()
-          history = JSON.parse(text)
-          if (!Array.isArray(history)) history = []
-        }
-      } catch {}
-      history.push(nowEntry)
-      const histBlob = new Blob([JSON.stringify(history)], { type: 'application/json' })
-      await sb.storage.from(bucket).upload(`${prefix}/meta/history.json`, histBlob, { upsert: true, cacheControl: 'no-cache' })
-    } catch (e) {
-      console.log('Failed to write history.json (disabling future meta writes):', e)
-      disableMetaWritesRef.current = true
-    }
-  }
-
-  // Start 3s enforcement window to ensure all clients are on the same track and play/pause state
-  const startNowEnforcement = (index: number, time: number, expectedPlaying: boolean = true) => {
-    const ch = channelRef.current
-    if (!ch) return
-    roomEnforcementIndexRef.current = index
-    roomNowStartedAtRef.current = Date.now() - Math.floor(time * 1000)
-    roomEnforcementEndAtRef.current = Date.now() + 3000
-    roomExpectedPlayingRef.current = expectedPlaying
-    roomExpectedFrozenElapsedRef.current = expectedPlaying ? 0 : Math.max(0, Math.floor(time))
-
-    // Announce now playing to all
-    try {
-      ch.send({
-        type: 'broadcast',
-        event: 'room:now_playing',
-        payload: { sender: clientIdRef.current, index, startedAt: roomNowStartedAtRef.current }
-      })
-    } catch {}
-
-    // Clear any previous timer
-    if (roomEnforcementTimerRef.current) {
-      clearInterval(roomEnforcementTimerRef.current)
-      roomEnforcementTimerRef.current = null
-    }
-
-    const sendVerify = () => {
-      try {
-        const expectedPlaying = roomExpectedPlayingRef.current
-        const expectedElapsed = expectedPlaying
-          ? Math.max(0, Math.floor((Date.now() - roomNowStartedAtRef.current) / 1000))
-          : roomExpectedFrozenElapsedRef.current
-        ch.send({
-          type: 'broadcast',
-          event: 'room:verify_now',
-          payload: { sender: clientIdRef.current, expectedIndex: index, expectedElapsed, expectedPlaying }
-        })
-      } catch {}
-    }
-
-    // Immediate verify ping, then poll clients every 250ms within the 3s window
-    sendVerify()
-    roomEnforcementTimerRef.current = setInterval(() => {
-      const now = Date.now()
-      if (now > roomEnforcementEndAtRef.current) {
-        // Write a final listeners snapshot at the end of the window
-        try { if (!disableMetaWritesRef.current) void writeListenersSnapshot() } catch {}
-        if (roomEnforcementTimerRef.current) {
-          clearInterval(roomEnforcementTimerRef.current)
-          roomEnforcementTimerRef.current = null
-        }
-        return
-      }
-      sendVerify()
-    }, 250)
-  }
-
-  // Persist snapshot of what each participant is listening to (host only)
-  const writeListenersSnapshot = async () => {
-    const sb = supabase
-    if (!sb || !roomCode || !isHostRef.current) return
-    const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
-    const prefix = `rooms/${roomCode}`
-    const snapshot: Array<{ clientId: string; name: string; index: number; updatedAt: string }> = []
-    participantNowRef.current.forEach((val, key) => {
-      const name = clientIdToNameRef.current.get(key) || (key === clientIdRef.current ? (displayNameRef.current || 'Host') : 'Guest')
-      snapshot.push({ clientId: key, name, index: val.index, updatedAt: new Date(val.updatedAt).toISOString() })
-    })
-    try {
-      const blob = new Blob([JSON.stringify({ updatedAt: new Date().toISOString(), listeners: snapshot })], { type: 'application/json' })
-      await sb.storage.from(bucket).upload(`${prefix}/meta/listeners.json`, blob, { upsert: true, cacheControl: 'no-cache' })
-    } catch (e) {
-      console.log('Failed to write listeners.json:', e)
-    }
-  }
 
 
 
@@ -523,6 +147,186 @@ export default function App(): JSX.Element {
     }, duration)
   }
 
+  // Upload hook
+  const {
+    isUploading,
+    uploadProgress,
+    totalUploadSize,
+    totalUploaded,
+    isUploadOpen,
+    isProgressOpen,
+    setIsUploadOpen,
+    setIsProgressOpen,
+    onFiles,
+    cancelUpload
+  } = useUpload(roomCode, inRoom, setError, addToast, setTracks, channelRef, clientIdRef);
+
+  // Room management hook
+  const {
+    createName,
+    setCreateName,
+    joinName,
+    setJoinName,
+    roomTitleInput,
+    setRoomTitleInput,
+    joinCodeInput,
+    setJoinCodeInput,
+    createRoom,
+    joinRoom,
+    endRoom,
+    leaveRoom,
+    cleanupRoomState,
+    roomExists,
+    roomIsActive,
+    generateRoomCode,
+    generateUniqueRoomCode
+  } = useRoomManagement(setError, setRoomCode, setInRoom, setIsHost, setDisplayName, setRoomTitle, setTracks, setCurrentIndex, setIsPlaying, setCurrentTime, channelRef);
+
+  // Audio player hook
+  const {
+    audioRef,
+    togglePlay: togglePlayRaw,
+    playCurrent,
+    unlockPlayback,
+    onLoadedMetadata,
+    onTimeUpdate,
+    onSeek: onSeekRaw,
+    onEnded: onEndedRaw
+  } = useAudioPlayer({
+    tracks,
+    currentIndex,
+    isPlaying,
+    currentTime,
+    duration,
+    volume,
+    isApplyingRemoteRef,
+    shouldAutoplayRef,
+    pendingRemotePlayRef,
+    tracksRef,
+    currentIndexRef,
+    isPlayingRef,
+    isShuffleRef,
+    setCurrentIndex,
+    setCurrentTime,
+    setDuration,
+    setIsPlaying,
+    setPlaybackBlocked,
+    setWaitingForSync,
+    setSyncRetryCount,
+    setPendingSyncState,
+    setIsOutOfSync,
+    addToast,
+    channelRef,
+    clientIdRef,
+    logSyncEvent
+  });
+
+  // Room enforcement hook
+  const {
+    roomEnforcementTimerRef,
+    roomEnforcementEndAtRef,
+    roomEnforcementIndexRef,
+    roomNowStartedAtRef,
+    suppressEnforcementRef,
+    lastListenersWriteAtRef,
+    roomExpectedPlayingRef,
+    roomExpectedFrozenElapsedRef,
+    disableMetaWritesRef,
+    lastNowRecordIndexRef,
+    lastNowRecordAtRef,
+    recordRoomNowAndHistory,
+    startNowEnforcement,
+    writeListenersSnapshot
+  } = useRoomEnforcement({
+    roomCode,
+    tracksRef,
+    displayNameRef,
+    isHostRef,
+    channelRef,
+    clientIdRef,
+    participantNowRef,
+    clientIdToNameRef
+  });
+
+  // Sync management hook
+  const {
+    syncRequestAttempts,
+    requestHostStateWithRetry,
+    handleOutOfSync,
+    fetchRoomStateFromStorage
+  } = useSyncManagement({
+    roomCode,
+    tracks,
+    currentIndex,
+    isPlaying,
+    currentTime,
+    isShuffle,
+    isHost,
+    isApplyingRemoteRef,
+    shouldAutoplayRef,
+    tracksRef,
+    currentIndexRef,
+    isPlayingRef,
+    isShuffleRef,
+    channelRef,
+    clientIdRef,
+    setCurrentIndex,
+    setCurrentTime,
+    setIsPlaying,
+    setIsShuffle,
+    setPlaybackBlocked,
+    setWaitingForSync,
+    setSyncRetryCount,
+    setPendingSyncState,
+    setIsOutOfSync,
+    addToast
+  });
+
+  // Command queue hook
+  const {
+    globalCommandQueueRef,
+    isProcessingGlobalQueueRef,
+    processGlobalQueue,
+    enqueueGlobalCommand,
+    executePlayCommand,
+    executePauseCommand,
+    executeSeekCommand,
+    executeNextCommand,
+    executePreviousCommand,
+    executeSelectCommand,
+    executeShuffleToggleCommand,
+    executeShuffleNextCommand
+  } = useCommandQueue({
+    tracks,
+    currentIndex,
+    isPlaying,
+    isShuffle,
+    isHost,
+    channelRef,
+    clientIdRef,
+    audioRef,
+    setCurrentIndex,
+    setCurrentTime,
+    setIsPlaying,
+    setIsShuffle,
+    shouldAutoplayRef,
+    isApplyingRemoteRef,
+    tracksRef,
+    currentIndexRef,
+    isPlayingRef,
+    isShuffleRef,
+    suppressEnforcementRef,
+    recordRoomNowAndHistory,
+    startNowEnforcement
+  });
+
+  // Wrapper functions that use the command queue
+  const togglePlay = async () => await togglePlayRaw(enqueueGlobalCommand)
+  const onSeek = (value: number) => onSeekRaw(value, enqueueGlobalCommand)
+  const onEnded = () => onEndedRaw(enqueueGlobalCommand)
+
+
+
   // Cleanup local object URLs on unmount
   useEffect(() => {
     return () => {
@@ -532,12 +336,7 @@ export default function App(): JSX.Element {
     }
   }, [tracks])
 
-  // Reflect volume changes
-  useEffect(() => {
-    if (audioRef.current) {
-      audioRef.current.volume = volume
-    }
-  }, [volume])
+
 
   // Keep displayName ref in sync to avoid stale closures when tracking presence
   useEffect(() => { displayNameRef.current = displayName }, [displayName])
@@ -579,312 +378,7 @@ export default function App(): JSX.Element {
     }
   }, [error])
 
-  const onFiles = async (files: FileList | null) => {
-    if (!files || files.length === 0) return
 
-    const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
-    if (!supabase) {
-      setError('Supabase is not configured. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY, then restart the dev server.')
-      return
-    }
-    if (!inRoom || !roomCode) {
-      setError('Join or create a room before uploading.')
-      return
-    }
-    const accepted: File[] = []
-    let unsupported = 0
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i]
-      const lowerName = file.name.toLowerCase()
-      const type = file.type || ''
-      const isAccepted = ACCEPTED_TYPES.includes(type)
-        || lowerName.endsWith('.mp3')
-        || lowerName.endsWith('.wav')
-        || lowerName.endsWith('.m4a')
-        || lowerName.endsWith('.aac')
-      if (!isAccepted) {
-        unsupported++
-      } else {
-        accepted.push(file)
-      }
-    }
-
-    if (accepted.length === 0) {
-      setError('Unsupported file type. Please upload MP3 or WAV files.')
-      return
-    }
-
-    // Clear any previous errors
-    setError(null)
-
-    // Initialize upload progress and open progress modal
-    const totalSize = accepted.reduce((sum, file) => sum + file.size, 0)
-    const progressItems: UploadProgress[] = accepted.map(file => ({
-      fileName: file.name,
-      progress: 0,
-      uploaded: 0,
-      total: file.size,
-      speed: 0,
-      status: 'pending'
-    }))
-
-    setUploadProgress(progressItems)
-    setTotalUploadSize(totalSize)
-    setTotalUploaded(0)
-    setIsUploading(true)
-    setIsUploadOpen(false)
-    setIsProgressOpen(true)
-    if (unsupported > 0) addToast(`${unsupported} file(s) were skipped (unsupported type).`, 'warning')
-
-    try {
-      const uploadedTracks: Track[] = []
-      uploadCancelRef.current = false
-      activeXhrsRef.current = []
-      uploadedPathsRef.current = []
-      
-      for (let i = 0; i < accepted.length; i++) {
-        // Check if upload was cancelled
-        if (uploadCancelRef.current) {
-          break
-        }
-
-        const file = accepted[i]
-        const startTime = Date.now()
-        let lastUpdateTime = startTime
-        let lastUploaded = 0
-
-        // Update status to uploading
-        setUploadProgress(prev => prev.map((item, index) => 
-          index === i ? { ...item, status: 'uploading' } : item
-        ))
-
-        // Clean the filename by removing brackets and other problematic characters
-        const cleanedFileName = cleanFileName(file.name)
-        // Encode the cleaned filename to handle special characters safely
-        const encodedFileName = encodeURIComponent(cleanedFileName)
-        const path = `rooms/${roomCode}/tracks/${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}-${encodedFileName}`
-
-        // Create a custom upload with progress tracking
-        const uploadWithProgress = async (): Promise<{ error?: any }> => {
-          return new Promise((resolve) => {
-            const xhr = new XMLHttpRequest()
-            activeXhrsRef.current.push(xhr)
-            
-            xhr.upload.addEventListener('progress', (e) => {
-              // Check if cancelled during progress
-              if (uploadCancelRef.current) {
-                xhr.abort()
-                return
-              }
-
-              if (e.lengthComputable) {
-                const now = Date.now()
-                const timeDiff = (now - lastUpdateTime) / 1000 // seconds
-                const uploadedDiff = e.loaded - lastUploaded
-                const speed = timeDiff > 0 ? uploadedDiff / timeDiff : 0
-
-                setUploadProgress(prev => prev.map((item, index) => 
-                  index === i ? {
-                    ...item,
-                    progress: (e.loaded / e.total) * 100,
-                    uploaded: e.loaded,
-                    speed
-                  } : item
-                ))
-
-                setTotalUploaded(prev => prev + uploadedDiff)
-                lastUpdateTime = now
-                lastUploaded = e.loaded
-              }
-            })
-
-            xhr.addEventListener('load', () => {
-              if (xhr.status === 200) {
-                resolve({})
-              } else {
-                resolve({ error: new Error(`Upload failed with status ${xhr.status}`) })
-              }
-            })
-
-            xhr.addEventListener('error', () => {
-              resolve({ error: new Error('Upload failed') })
-            })
-
-            xhr.addEventListener('abort', () => {
-              resolve({ error: new Error('Upload cancelled') })
-            })
-
-            // Get upload URL from Supabase
-            if (!supabase) {
-              resolve({ error: new Error('Supabase client not available') })
-              return
-            }
-            supabase.storage.from(bucket).createSignedUploadUrl(path).then(({ data, error }) => {
-              // Check if cancelled before starting upload
-              if (uploadCancelRef.current) {
-                xhr.abort()
-                return
-              }
-
-              if (error || !data?.signedUrl) {
-                resolve({ error: error || new Error('Failed to get upload URL') })
-                return
-              }
-
-              xhr.open('PUT', data.signedUrl)
-              xhr.setRequestHeader('Content-Type', file.type || 'audio/mpeg')
-              xhr.send(file)
-            })
-          })
-        }
-
-        const { error: upErr } = await uploadWithProgress()
-        
-        // Check if cancelled after upload attempt
-        if (uploadCancelRef.current) {
-          break
-        }
-        
-        if (upErr) {
-          setUploadProgress(prev => prev.map((item, index) => 
-            index === i ? { ...item, status: 'error', error: upErr.message } : item
-          ))
-          // Don't set error for cancelled uploads
-          if (!upErr.message.includes('cancelled')) {
-            setError(`Upload failed for ${file.name}: ${upErr.message}`)
-          }
-          continue
-        }
-
-        // Mark as completed
-        setUploadProgress(prev => prev.map((item, index) => 
-          index === i ? { ...item, status: 'completed', progress: 100 } : item
-        ))
-
-        // Prefer signed URL so it works even if bucket is private
-        // The path already contains the encoded filename, so we don't need to encode again
-        const { data: signed, error: signErr } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
-        if (signErr || !signed?.signedUrl) {
-          // Try public URL fallback
-          const { data: pub } = supabase.storage.from(bucket).getPublicUrl(path)
-          if (!pub?.publicUrl) {
-            setError(`Could not generate URL for ${file.name}`)
-            addToast(`Could not generate URL for ${file.name}`, 'error')
-            continue
-          }
-          uploadedTracks.push({
-            id: path,
-            file,
-            url: pub.publicUrl,
-            name: cleanFileName(file.name),
-            path
-          })
-        } else {
-          uploadedTracks.push({
-            id: path,
-            file,
-            url: signed.signedUrl,
-            name: cleanFileName(file.name),
-            path
-          })
-        }
-        uploadedPathsRef.current.push(path)
-      }
-
-      // Check if upload was cancelled
-      if (uploadCancelRef.current) {
-        // Clean up any uploaded files
-        if (uploadedPathsRef.current.length > 0) {
-          try {
-            const paths = [...uploadedPathsRef.current]
-            uploadedPathsRef.current = []
-            if (supabase) {
-              // Remove in chunks of 100
-              const chunkSize = 100
-              for (let i = 0; i < paths.length; i += chunkSize) {
-                const chunk = paths.slice(i, i + chunkSize)
-                await supabase.storage.from(bucket).remove(chunk)
-              }
-            }
-          } catch (error) {
-            console.error('Failed to clean up uploaded files:', error)
-          }
-        }
-        
-        // Reset UI state
-        setIsUploading(false)
-        setIsProgressOpen(false)
-        setUploadProgress([])
-        setTotalUploadSize(0)
-        setTotalUploaded(0)
-        return
-      }
-
-      if (uploadedTracks.length > 0) {
-        // Optionally persist track metadata (display names) to tracks.json
-        const shouldWriteMeta = (import.meta.env.VITE_ENABLE_TRACKS_META as string) === '1'
-        if (shouldWriteMeta) {
-          try {
-            const metaPath = `rooms/${roomCode}/meta/tracks.json`
-            const { data: existing } = await supabase.storage.from(bucket).download(metaPath)
-            let trackMeta: Array<{ path: string; name: string }> = []
-            if (existing) {
-              try { trackMeta = JSON.parse(await existing.text()) as Array<{ path: string; name: string }> } catch {}
-            }
-            const toAppend = uploadedTracks.map(t => ({ path: t.path, name: cleanFileName(t.name) }))
-            // Merge unique by path
-            const seen = new Set(trackMeta.map(i => i.path))
-            for (const it of toAppend) { if (!seen.has(it.path)) trackMeta.push(it) }
-            const blob = new Blob([JSON.stringify(trackMeta, null, 2)], { type: 'application/json' })
-            await supabase.storage.from(bucket).upload(metaPath, blob, { upsert: true })
-          } catch {}
-        }
-
-        setTracks(prev => {
-          const next = [...prev, ...uploadedTracks]
-          if (prev.length === 0) {
-            setCurrentIndex(0)
-            // Do not autoplay on upload; wait for explicit play action
-            shouldAutoplayRef.current = false
-          }
-          return next
-        })
-        setIsPlaying(false)
-        setCurrentTime(0)
-        if (channelRef.current) {
-          const payload = uploadedTracks.map(t => ({ path: t.path, name: cleanFileName(t.name) }))
-          channelRef.current.send({ type: 'broadcast', event: 'playlist:add', payload: { items: payload, sender: clientIdRef.current } })
-        }
-        // Do not reload canonical order here; we already appended locally and broadcasted
-      }
-
-      // All uploads completed successfully (if not cancelled)
-      if (uploadedTracks.length > 0) {
-        // Show success message
-        addToast(`Successfully uploaded ${uploadedTracks.length} track(s)!`, 'success')
-        
-        // Close upload modal after a short delay
-        setTimeout(() => {
-          setIsUploadOpen(false)
-          setIsProgressOpen(false)
-          setUploadProgress([])
-          setTotalUploadSize(0)
-          setTotalUploaded(0)
-        }, 1500)
-      } else {
-        // No successful uploads, close modal immediately
-        setIsUploadOpen(false)
-        setIsProgressOpen(false)
-        setUploadProgress([])
-        setTotalUploadSize(0)
-        setTotalUploaded(0)
-      }
-    } finally {
-      setIsUploading(false)
-      // Clear active xhrs list
-      activeXhrsRef.current = []
-    }
-  }
 
   // Load existing songs and room meta for the current room
   useEffect(() => {
@@ -942,15 +436,16 @@ export default function App(): JSX.Element {
 
         const loaded: Track[] = []
         const pushTrack = async (fileName: string, display?: string) => {
-          const lower = (fileName || '').toLowerCase()
-          if (!/(\.mp3|\.wav|\.m4a|\.aac|\.flac|\.ogg|\.oga|\.opus)$/i.test(lower)) return
-          const path = `${tracksPrefix}/${fileName}`
-          const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
-          const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl
-          if (!url) return
-          const displayName = display || nameByPath.get(path) || deriveDisplayNameFromObjectName(fileName)
-          loaded.push({ id: path, url, name: displayName, path })
-        }
+          if (!supabase) return;
+          const lower = (fileName || '').toLowerCase();
+          if (!/\.(mp3|wav|m4a|aac|flac|ogg|oga|opus)$/i.test(lower)) return;
+          const path = `${tracksPrefix}/${fileName}`;
+          const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7);
+          const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl;
+          if (!url) return;
+          const displayName = display || nameByPath.get(path) || deriveDisplayNameFromObjectName(fileName);
+          loaded.push({ id: path, url, name: displayName, path });
+        };
 
         if (canonicalOrder && canonicalOrder.length > 0) {
           for (const it of canonicalOrder) {
@@ -964,7 +459,7 @@ export default function App(): JSX.Element {
           }
         }
 
-        setTracks(loaded)
+        setTracks(sortTracksAlphabetically(loaded))
         setCurrentIndex(loaded.length > 0 ? 0 : -1)
         setCurrentTime(0)
         // If a remote play was requested before we loaded, apply now
@@ -1007,6 +502,9 @@ export default function App(): JSX.Element {
     } catch {}
   }, [isHost, inRoom])
 
+  // Remove the unnecessary periodic sync check - it shows "out of sync" unnecessarily
+  // The Force Resync button should only appear when there's a real sync issue
+
   const onDrop: React.DragEventHandler<HTMLDivElement> = (e) => {
     e.preventDefault()
     e.stopPropagation()
@@ -1020,92 +518,103 @@ export default function App(): JSX.Element {
 
 
 
-  const togglePlay = async () => {
-    if (isApplyingRemoteRef.current) return
-    const audio = audioRef.current
-    if (!audio) return
-    
-    if (audio.paused) {
-      enqueueGlobalCommand('play', { index: Math.max(0, currentIndexRef.current), time: audio.currentTime })
-    } else {
-      enqueueGlobalCommand('pause', { time: audio.currentTime })
-    }
-  }
 
-  const playCurrent = async () => {
-    const audio = audioRef.current
-    if (!audio) return
-    try {
-      // Only load if audio is in error state or not ready
-      if (audio.readyState === 0 || audio.error) {
-        audio.load()
+
+  // Listen for player:state_response and handle advanced sync
+  useEffect(() => {
+    if (!inRoom || !waitingForSync) return;
+    const handler = ({ payload }: any) => {
+      if (!payload || payload.sender === clientIdRef.current || payload.target !== clientIdRef.current) return;
+      logSyncEvent('Received state from host for sync recovery', payload);
+      setPendingSyncState(payload);
+    };
+    if (channelRef.current) {
+      channelRef.current.on('broadcast', { event: 'player:state_response' }, handler);
+    }
+    return () => {
+      // No cleanup needed; Supabase RealtimeChannel does not support .off
+    };
+  }, [inRoom, waitingForSync]);
+
+  // When pendingSyncState is set, apply it and play
+  useEffect(() => {
+    if (!pendingSyncState) return;
+    const { index, time, isPlaying: remoteIsPlaying, isShuffle: remoteShuffle } = pendingSyncState;
+    if (index >= 0 && index < tracksRef.current.length) {
+      isApplyingRemoteRef.current = true;
+      if (typeof remoteShuffle === 'boolean') {
+        setIsShuffle(remoteShuffle);
       }
-      await audio.play()
-      setIsPlaying(true)
-    } catch (err) {
-      console.warn('Playback error:', err)
-      // Likely autoplay is blocked until user interacts
-      setPlaybackBlocked(true)
-    }
-  }
-
-  const unlockPlayback = async () => {
-    const audio = audioRef.current
-    if (!audio) { setPlaybackBlocked(false); return }
-    try {
-      const pending = pendingRemotePlayRef.current
-      if (pending) {
-        pendingRemotePlayRef.current = null
-        const { index, time } = pending
-        if (currentIndexRef.current !== index) {
-          setCurrentIndex(index)
-          setCurrentTime(time)
-          shouldAutoplayRef.current = true
-          // Wait a tick for state to propagate and metadata to load
-          await new Promise(resolve => setTimeout(resolve, 0))
-        } else {
-          audio.currentTime = time
+      if (index !== currentIndexRef.current) {
+        setCurrentIndex(index);
+        setCurrentTime(time);
+        shouldAutoplayRef.current = remoteIsPlaying;
+      } else {
+        setCurrentTime(time);
+        const audio = audioRef.current;
+        if (audio) {
+          audio.currentTime = time;
         }
       }
-      await audio.play()
-      setIsPlaying(true)
-      setPlaybackBlocked(false)
-    } catch {
-      // If still blocked, leave banner visible
+      // Try to play after setting state
+      setTimeout(() => {
+        const audio = audioRef.current;
+        if (audio && remoteIsPlaying) {
+          audio.currentTime = time;
+          audio.play().then(() => {
+            setIsPlaying(true);
+            setPlaybackBlocked(false);
+            setWaitingForSync(false);
+            setSyncRetryCount(0);
+            setIsOutOfSync(false);
+            addToast('Playback resumed and synced!', 'success');
+            // Verify sync after 1s
+            setTimeout(() => {
+              const drift = Math.abs(audio.currentTime - time);
+              if (currentIndexRef.current !== index || drift > 1) {
+                logSyncEvent('Drift detected after resume, auto-correcting', { drift, index, currentIndex: currentIndexRef.current });
+                setCurrentIndex(index);
+                setCurrentTime(time);
+                audio.currentTime = time;
+                addToast('Resynced with host after playback recovery.', 'info');
+              }
+            }, 1000);
+          }).catch((e) => {
+            logSyncEvent('Playback failed after sync recovery', e);
+            setSyncRetryCount(c => c + 1);
+            if (syncRetryCount < 2) {
+              // Retry sync
+              if (channelRef.current) {
+                channelRef.current.send({
+                  type: 'broadcast',
+                  event: 'player:request_state',
+                  payload: { sender: clientIdRef.current }
+                });
+              }
+            } else {
+              setIsOutOfSync(true);
+              setWaitingForSync(false);
+              addToast('Sync failed after multiple attempts. Please force resync.', 'error');
+            }
+          });
+        } else {
+          setIsPlaying(false);
+          setPlaybackBlocked(false);
+          setWaitingForSync(false);
+          setSyncRetryCount(0);
+          setIsOutOfSync(false);
+        }
+        isApplyingRemoteRef.current = false;
+      }, 200);
+    } else {
+      setIsOutOfSync(true);
+      setWaitingForSync(false);
+      addToast('Playlist mismatch during sync recovery. Please force resync.', 'error');
     }
-  }
+    setPendingSyncState(null);
+  }, [pendingSyncState, tracks]);
 
-  const onLoadedMetadata: React.ReactEventHandler<HTMLAudioElement> = (e) => {
-    const el = e.currentTarget
-    setDuration(el.duration)
-    // If a local action requested autoplay, honor it immediately
-    if (shouldAutoplayRef.current) {
-      shouldAutoplayRef.current = false
-      void playCurrent()
-    }
-    // Apply any pending remote play now that metadata is ready
-    if (pendingRemotePlayRef.current) {
-      const { index, time } = pendingRemotePlayRef.current
-      pendingRemotePlayRef.current = null
-      try {
-        el.currentTime = time
-        void el.play()
-        setIsPlaying(true)
-      } catch {
-        setPlaybackBlocked(true)
-        pendingRemotePlayRef.current = { index, time }
-      }
-    }
-  }
 
-  const onTimeUpdate: React.ReactEventHandler<HTMLAudioElement> = (e) => {
-    setCurrentTime(e.currentTarget.currentTime)
-  }
-
-  const onSeek = (value: number) => {
-    if (isApplyingRemoteRef.current) return
-    enqueueGlobalCommand('seek', { time: value })
-  }
 
   const currentTrack = tracks[currentIndex] ?? null
   const fileName = useMemo(() => currentTrack?.name ?? 'No track selected', [currentTrack])
@@ -1123,229 +632,37 @@ export default function App(): JSX.Element {
     enqueueGlobalCommand('next', { fromIndex: currentIndexRef.current })
   }
 
-  // When metadata loads for a new track, autoplay if flagged
-  useEffect(() => {
-    if (!currentTrack) return
-    const audio = audioRef.current
-    if (!audio) return
-    const handleLoaded = async () => {
-      if (shouldAutoplayRef.current) {
-        shouldAutoplayRef.current = false
-        await playCurrent()
-      }
-      // Apply any pending remote play now that metadata is ready
-      if (pendingRemotePlayRef.current) {
-        const { index, time } = pendingRemotePlayRef.current
-        pendingRemotePlayRef.current = null
-        try {
-          audio.currentTime = time
-          await audio.play()
-          setIsPlaying(true)
-        } catch {}
-      }
-    }
-    audio.addEventListener('loadedmetadata', handleLoaded)
-    return () => audio.removeEventListener('loadedmetadata', handleLoaded)
-  }, [currentTrack?.url])
+  // Background audio hook
+  const {
+    wakeLockRef,
+    audioWakeLockRef,
+    keepAliveIntervalRef,
+    connectionCheckIntervalRef,
+    isPageVisibleRef
+  } = useBackgroundAudio({
+    inRoom,
+    currentTrack,
+    isPlaying,
+    hasPrevious,
+    hasNext,
+    roomCode,
+    channelRef,
+    clientIdRef,
+    isHost,
+    audioRef,
+    setIsPlaying,
+    setCurrentTime,
+    goPrevious,
+    goNext
+  });
 
-  const cleanupRoomState = () => {
-    setInRoom(false)
-    setIsHost(false)
-    setRoomCode('')
-    setTracks([])
-    setCurrentIndex(-1)
-    setIsPlaying(false)
-    setCurrentTime(0)
-  }
 
-  const endRoom = async () => {
-    if (!isHost || !supabase || !roomCode) return
-    const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
-    try {
-      const limit = 100
-      let offset = 0
-      while (true) {
-        const { data: files, error: listErr } = await supabase.storage.from(bucket).list(`rooms/${roomCode}`, { limit, offset, sortBy: { column: 'name', order: 'asc' } })
-        if (listErr) break
-        const batch = (files || []).flatMap(f => [
-          `rooms/${roomCode}/${f.name}`,
-          `rooms/${roomCode}/tracks/${f.name}`,
-          `rooms/${roomCode}/meta/${f.name}`
-        ])
-        if (batch.length === 0) break
-        // Remove in chunks to avoid limits
-        const chunkSize = 100
-        for (let i = 0; i < batch.length; i += chunkSize) {
-          const chunk = batch.slice(i, i + chunkSize)
-          await supabase.storage.from(bucket).remove(chunk)
-        }
-        if (batch.length < limit) break
-        offset += limit
-      }
-      // Attempt to remove the now-empty folder marker by uploading a tombstone and removing it (some providers keep a prefix until a write occurs)
-      try {
-        const tomb = new Blob([" "])
-        await supabase.storage.from(bucket).upload(`rooms/${roomCode}/.tomb`, tomb, { upsert: true })
-        await supabase.storage.from(bucket).remove([`rooms/${roomCode}/.tomb`])
-      } catch {}
-      // Finally, remove meta.json explicitly in case it was cached/generated late
-      try {
-        await supabase.storage.from(bucket).remove([`rooms/${roomCode}/meta.json`])
-      } catch {}
-      // Write an ended flag so clients won't restore into a deleted room even if some cached URLs exist
-      try {
-        const endedBlob = new Blob([JSON.stringify({ code: roomCode, endedAt: new Date().toISOString() })], { type: 'application/json' })
-        await supabase.storage.from(bucket).upload(`ended/${roomCode}.json`, endedBlob, { upsert: true, cacheControl: 'no-cache' })
-      } catch {}
-    } catch {}
-    if (channelRef.current) {
-      channelRef.current.send({ type: 'broadcast', event: 'room:ended', payload: { sender: clientIdRef.current } })
-    }
-    cleanupRoomState()
-    try {
-      localStorage.removeItem('groovebox_room')
-      localStorage.removeItem('groovebox_is_host')
-      localStorage.removeItem('groovebox_name') // Clear name when ending room
-    } catch {}
-    setDisplayName('') // Clear display name when ending room
-  }
 
-  const leaveRoom = async () => {
-    try { localStorage.removeItem('groovebox_room') } catch {}
-    try { localStorage.removeItem('groovebox_is_host') } catch {}
-    try { localStorage.removeItem('groovebox_name') } catch {} // Clear name when leaving room
-    if (channelRef.current) {
-      channelRef.current.unsubscribe()
-      channelRef.current = null
-    }
-    cleanupRoomState()
-    setDisplayName('') // Clear display name when leaving room
-  }
 
-  // Do not end the room automatically on refresh/navigation.
-  // Hosts remain hosts after refresh; room persists until explicitly ended.
-  useEffect(() => {
-    const handler = () => {}
-    window.addEventListener('beforeunload', handler)
-    return () => window.removeEventListener('beforeunload', handler)
-  }, [])
 
-  const generateRoomCode = () => {
-    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-    let code = ''
-    for (let i = 0; i < 6; i++) code += alphabet[Math.floor(Math.random() * alphabet.length)]
-    return code
-  }
 
-  const roomExists = async (code: string): Promise<boolean> => {
-    if (!supabase) return false
-    const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
-    try {
-      const { data } = await supabase.storage.from(bucket).download(`rooms/${code}/meta/meta.json`)
-      return !!data
-    } catch {
-      return false
-    }
-  }
 
-  const roomEndedFlagExists = async (code: string): Promise<boolean> => {
-    if (!supabase) return false
-    const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
-    try {
-      const { data: list } = await supabase.storage.from(bucket).list('ended', {
-        limit: 1,
-        search: `${code}.json`
-      })
-      return Array.isArray(list) && list.some(f => f.name === `${code}.json`)
-    } catch {
-      return false
-    }
-  }
 
-  const roomIsActive = async (code: string): Promise<boolean> => {
-    const ended = await roomEndedFlagExists(code)
-    if (ended) return false
-    return await roomExists(code)
-  }
-
-  const generateUniqueRoomCode = async (): Promise<string> => {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const code = generateRoomCode()
-      if (!supabase) return code
-      const exists = await roomExists(code)
-      if (!exists) return code
-    }
-    return generateRoomCode()
-  }
-
-  const createRoom = async () => {
-    setError(null)
-    if (!supabase) { setError('Supabase not configured'); return }
-    
-    // Always require a name from the input field, don't fall back to displayName
-    const name = createName.trim()
-    if (!name) { 
-      setError('Please enter your name'); 
-      return 
-    }
-    
-    const code = await generateUniqueRoomCode()
-    // Ensure name is set before we subscribe to presence
-    setDisplayName(name)
-    pendingSelfNameRef.current = name
-    setRoomCode(code)
-    setIsHost(true)
-    setInRoom(true)
-    setError(null)
-    
-    try {
-      localStorage.setItem('groovebox_room', code)
-      localStorage.setItem('groovebox_name', name)
-      localStorage.setItem('groovebox_is_host', '1')
-    } catch {}
-    try {
-      const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
-      const meta = { roomName: roomTitleInput.trim(), hostName: name, createdAt: new Date().toISOString() }
-      const metaBlob = new Blob([JSON.stringify(meta)], { type: 'application/json' })
-      await supabase.storage.from(bucket).upload(`rooms/${code}/meta/meta.json`, metaBlob, { upsert: true, cacheControl: 'no-cache' })
-      // Clear any ended flag if it exists for this code reuse (defensive)
-      try { await supabase.storage.from(bucket).remove([`ended/${code}.json`]) } catch {}
-      setRoomTitle(meta.roomName || '')
-    } catch {}
-  }
-
-  const joinRoom = async () => {
-    setError(null)
-    if (!supabase) { setError('Supabase not configured'); return }
-    const code = joinCodeInput.trim().toUpperCase()
-    
-    // Always require a name from the input field, don't fall back to displayName
-    const name = joinName.trim()
-    if (!name) { 
-      setError('Please enter your name'); 
-      return 
-    }
-    
-    if (!code) return
-    const validCode = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/.test(code)
-    if (!validCode) { setError('Invalid room code'); return }
-    const active = await roomIsActive(code)
-    if (!active) { setError('Room not found or has ended'); return }
-    
-    // Ensure name is set before we subscribe to presence
-    setDisplayName(name)
-    pendingSelfNameRef.current = name
-    setRoomCode(code)
-    setIsHost(false)
-    setInRoom(true)
-    setError(null)
-    
-    try {
-      localStorage.setItem('groovebox_room', code)
-      localStorage.setItem('groovebox_name', name)
-      localStorage.setItem('groovebox_is_host', '0')
-    } catch {}
-  }
 
   // Realtime: subscribe to room events (presence, playlist, player)
   useEffect(() => {
@@ -1358,6 +675,10 @@ export default function App(): JSX.Element {
         presence: { key: clientIdRef.current }
       }
     })
+
+    // Dedupe and ordering state for commands
+    const lastSeqRef = { current: 0 } as React.MutableRefObject<number>
+    const seenCommandIdsRef = { current: new Set<string>() } as React.MutableRefObject<Set<string>>
 
     // Mobile backgrounding detection and reconnection
     let isPageVisible = true
@@ -1487,31 +808,22 @@ export default function App(): JSX.Element {
       const items = Array.isArray((payload as any).items) ? (payload as any).items as Array<{ path: string; name?: string }> : []
       if (items.length === 0) return
       try {
-        const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
-        const newTracks: Track[] = []
+        if (!supabase) return;
+        const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music';
+        const newTracks: Track[] = [];
         for (const it of items) {
-          const path = it.path
-          if (!path) continue
-          const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7)
-          const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl
-          if (!url) continue
-          const fileName = path.split('/').pop() || path
-          newTracks.push({ id: path, url, name: it.name || fileName, path })
+          const path = it.path;
+          if (!path) continue;
+          const { data: signed } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7);
+          const url = signed?.signedUrl || supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl;
+          if (!url) continue;
+          const fileName = path.split('/').pop() || path;
+          newTracks.push({ id: path, url, name: it.name || fileName, path });
         }
-        if (newTracks.length === 0) return
-        setTracks(prev => {
-          const existing = new Set(prev.map(t => t.path))
-          const toAdd = newTracks.filter(t => !existing.has(t.path))
-          if (toAdd.length === 0) return prev
-          if (prev.length === 0) {
-            setCurrentIndex(0)
-            setCurrentTime(0)
-            setIsPlaying(false)
-          }
-          return [...prev, ...toAdd]
-        })
+        if (newTracks.length === 0) return;
+        setTracks(prev => sortTracksAlphabetically([...prev, ...newTracks]))
       } catch (e) {
-        console.error('Failed to append tracks from playlist:add payload:', e)
+        console.error('Failed to append tracks from playlist:add payload:', e);
       }
     })
 
@@ -1519,7 +831,24 @@ export default function App(): JSX.Element {
     ch.on('broadcast', { event: 'player:command_queued' }, ({ payload }) => {
       if (!payload || payload.sender === clientIdRef.current) return
       
-      const { command, payload: cmdPayload, sender, timestamp } = payload
+      const { command, payload: cmdPayload, sender, timestamp, seq, commandId } = payload as {
+        command: string; payload: any; sender: string; timestamp: number; seq?: number; commandId?: string
+      }
+      // Dedupe by commandId
+      if (commandId && seenCommandIdsRef.current.has(commandId)) return
+      if (commandId) {
+        seenCommandIdsRef.current.add(commandId)
+        // Trim set to avoid unbounded growth
+        if (seenCommandIdsRef.current.size > 500) {
+          const iter = seenCommandIdsRef.current.values()
+          for (let i = 0; i < 100; i++) { const v = iter.next(); if (v.done) break; seenCommandIdsRef.current.delete(v.value) }
+        }
+      }
+      // Order by seq if provided
+      if (typeof seq === 'number') {
+        if (seq <= lastSeqRef.current) return
+        lastSeqRef.current = seq
+      }
       console.log(`Received queued command from ${sender}: ${command}`, cmdPayload)
       
       // Add to global queue
@@ -1841,318 +1170,7 @@ export default function App(): JSX.Element {
     }
   }, [inRoom, roomCode])
 
-  // Enhanced background audio and connection reliability
-  useEffect(() => {
-    if (!inRoom || !currentTrack) return
 
-    // Register service worker for background sync
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').then((registration) => {
-        console.log('Service Worker registered:', registration);
-        
-        // Register keep-alive with service worker
-        if (registration.active) {
-          registration.active.postMessage({
-            type: 'REGISTER_KEEP_ALIVE'
-          });
-        }
-      }).catch((error) => {
-        console.log('Service Worker registration failed:', error);
-      });
-    }
-
-    // AGGRESSIVE Background Audio Solution
-    let wakeLock: WakeLockSentinel | null = null;
-    let audioWakeLock: any = null;
-    
-    // Request wake lock to prevent device sleep
-    const requestWakeLock = async () => {
-      try {
-        if ('wakeLock' in navigator) {
-          wakeLock = await navigator.wakeLock.request('screen');
-          console.log('Wake lock acquired');
-        }
-      } catch (error) {
-        console.log('Wake lock failed:', error);
-      }
-    };
-
-    // Request audio wake lock (Android)
-    const requestAudioWakeLock = async () => {
-      try {
-        if ('mediaSession' in navigator && 'setActionHandler' in navigator.mediaSession) {
-          // Request audio focus
-          if ('requestAudioFocus' in navigator.mediaSession) {
-            (navigator.mediaSession as any).requestAudioFocus();
-          }
-        }
-      } catch (error) {
-        console.log('Audio wake lock failed:', error);
-      }
-    };
-
-    // Initialize wake locks
-    requestWakeLock();
-    requestAudioWakeLock();
-
-    // Media Session API for background controls
-    if ('mediaSession' in navigator) {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: currentTrack.name,
-        artist: 'GrooveBox Room',
-        album: `Room: ${roomCode}`,
-        artwork: [
-          {
-            src: '/favicon/favicon.svg',
-            sizes: '96x96',
-            type: 'image/svg+xml'
-          }
-        ]
-      })
-
-      // Handle background media controls
-      navigator.mediaSession.setActionHandler('play', () => {
-        if (audioRef.current && audioRef.current.paused) {
-          void audioRef.current.play()
-          setIsPlaying(true)
-        }
-      })
-
-      navigator.mediaSession.setActionHandler('pause', () => {
-        if (audioRef.current && !audioRef.current.paused) {
-          audioRef.current.pause()
-          setIsPlaying(false)
-        }
-      })
-
-      navigator.mediaSession.setActionHandler('previoustrack', () => {
-        if (hasPrevious) goPrevious()
-      })
-
-      navigator.mediaSession.setActionHandler('nexttrack', () => {
-        if (hasNext) goNext()
-      })
-
-      navigator.mediaSession.setActionHandler('seekto', (details) => {
-        if (audioRef.current && details.seekTime !== undefined) {
-          audioRef.current.currentTime = details.seekTime
-          setCurrentTime(details.seekTime)
-        }
-      })
-
-      // Update playback state
-      navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'
-    }
-
-    // AGGRESSIVE keep-alive mechanism for WebSocket connection
-    const keepAliveInterval = setInterval(() => {
-      if (channelRef.current) {
-        // Send a ping to keep the connection alive
-        try {
-          channelRef.current.send({
-            type: 'broadcast',
-            event: 'ping',
-            payload: { sender: clientIdRef.current, timestamp: Date.now() }
-          })
-        } catch (error) {
-          console.log('Keep-alive ping failed, connection may be stale')
-        }
-      }
-    }, 15000) // Every 15 seconds (more aggressive)
-
-    // Background audio optimization
-    const audio = audioRef.current
-    if (audio) {
-      // Set audio session to continue in background
-      if ('mediaSession' in navigator) {
-        // Enable background audio on mobile
-        audio.setAttribute('playsinline', 'true')
-        audio.setAttribute('webkit-playsinline', 'true')
-        
-        // Set audio session category for background playback (Firefox)
-        if ('mozAudioChannelType' in audio) {
-          (audio as any).mozAudioChannelType = 'content'
-        }
-      }
-
-      // Resume audio context if suspended (mobile backgrounding)
-      const resumeAudioContext = async () => {
-        try {
-          if (audio.readyState === 0) { // HAVE_NOTHING
-            await audio.load()
-          }
-        } catch (error) {
-          console.log('Audio context resume failed:', error)
-        }
-      }
-
-      // Resume on user interaction
-      const handleUserInteraction = () => {
-        resumeAudioContext()
-        document.removeEventListener('touchstart', handleUserInteraction)
-        document.removeEventListener('click', handleUserInteraction)
-        document.removeEventListener('keydown', handleUserInteraction)
-      }
-
-      document.addEventListener('touchstart', handleUserInteraction)
-      document.addEventListener('click', handleUserInteraction)
-      document.addEventListener('keydown', handleUserInteraction)
-
-      // Listen for service worker messages
-      const handleServiceWorkerMessage = (event: MessageEvent) => {
-        if (event.data && event.data.type === 'KEEP_ALIVE') {
-          // Service worker is keeping us alive, ensure connection is active
-          if (channelRef.current) {
-            try {
-              channelRef.current.send({
-                type: 'broadcast',
-                event: 'ping',
-                payload: { sender: clientIdRef.current, timestamp: Date.now() }
-              })
-            } catch (error) {
-              console.log('Service worker keep-alive ping failed:', error)
-            }
-          }
-        }
-      }
-
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage)
-      }
-
-      // Cleanup
-      return () => {
-        clearInterval(keepAliveInterval)
-        document.removeEventListener('touchstart', handleUserInteraction)
-        document.removeEventListener('click', handleUserInteraction)
-        document.removeEventListener('keydown', handleUserInteraction)
-        
-        if ('serviceWorker' in navigator) {
-          navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage)
-        }
-        
-        // Clean up Media Session
-        if ('mediaSession' in navigator) {
-          navigator.mediaSession.setActionHandler('play', null)
-          navigator.mediaSession.setActionHandler('pause', null)
-          navigator.mediaSession.setActionHandler('previoustrack', null)
-          navigator.mediaSession.setActionHandler('nexttrack', null)
-          navigator.mediaSession.setActionHandler('seekto', null)
-        }
-        
-        // Release wake locks
-        if (wakeLock) {
-          try {
-            wakeLock.release();
-            console.log('Wake lock released');
-          } catch (error) {
-            console.log('Wake lock release failed:', error);
-          }
-        }
-        
-        // Unregister keep-alive from service worker
-        if ('serviceWorker' in navigator) {
-          navigator.serviceWorker.ready.then((registration) => {
-            if (registration.active) {
-              registration.active.postMessage({
-                type: 'UNREGISTER_KEEP_ALIVE'
-              })
-            }
-          })
-        }
-      }
-    }
-  }, [inRoom, currentTrack, isPlaying, hasPrevious, hasNext, roomCode])
-
-  // AGGRESSIVE Connection Monitoring & Background Detection
-  useEffect(() => {
-    if (!inRoom) return
-
-    let isPageVisible = true
-    let connectionCheckInterval: NodeJS.Timeout | null = null
-    
-    // More aggressive page visibility detection
-    const handleVisibilityChange = () => {
-      const wasVisible = isPageVisible
-      isPageVisible = !document.hidden
-      
-      console.log('Page visibility changed:', { wasVisible, isPageVisible, hidden: document.hidden })
-      
-      if (wasVisible && !isPageVisible) {
-        // Page went to background - start aggressive monitoring
-        console.log('Page went to background - starting aggressive monitoring')
-        startAggressiveMonitoring()
-      } else if (!wasVisible && isPageVisible) {
-        // Page came back to foreground - stop aggressive monitoring
-        console.log('Page came back to foreground - stopping aggressive monitoring')
-        stopAggressiveMonitoring()
-        
-        // Immediately sync with host
-        if (channelRef.current && !isHost) {
-          channelRef.current.send({
-            type: 'broadcast',
-            event: 'player:request_state',
-            payload: { sender: clientIdRef.current }
-          })
-        }
-      }
-    }
-
-    // Start aggressive monitoring when backgrounded
-    const startAggressiveMonitoring = () => {
-      // Check connection every 5 seconds when backgrounded
-      connectionCheckInterval = setInterval(() => {
-        if (channelRef.current) {
-          try {
-            channelRef.current.send({
-              type: 'broadcast',
-              event: 'ping',
-              payload: { sender: clientIdRef.current, timestamp: Date.now() }
-            })
-          } catch (error) {
-            console.log('Aggressive monitoring ping failed:', error)
-          }
-        }
-      }, 5000)
-    }
-
-    // Stop aggressive monitoring when foregrounded
-    const stopAggressiveMonitoring = () => {
-      if (connectionCheckInterval) {
-        clearInterval(connectionCheckInterval)
-        connectionCheckInterval = null
-      }
-    }
-
-    // Listen for page visibility changes
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-    
-    // Also listen for page focus/blur events as backup
-    const handleFocus = () => {
-      if (!isPageVisible) {
-        isPageVisible = true
-        handleVisibilityChange()
-      }
-    }
-    
-    const handleBlur = () => {
-      if (isPageVisible) {
-        isPageVisible = false
-        handleVisibilityChange()
-      }
-    }
-    
-    window.addEventListener('focus', handleFocus)
-    window.addEventListener('blur', handleBlur)
-
-    // Cleanup
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-      window.removeEventListener('focus', handleFocus)
-      window.removeEventListener('blur', handleBlur)
-      stopAggressiveMonitoring()
-    }
-  }, [inRoom, isHost])
 
   // Restore session on first render, but only if room still exists and has not ended
   useEffect(() => {
@@ -2471,7 +1489,7 @@ export default function App(): JSX.Element {
             {isHost ? (
                     <button 
                       onClick={() => {
-                        endRoom()
+                        endRoom(roomCode, isHost)
                         setIsMobileMenuOpen(false)
                       }} 
                       className="w-full btn-outline border-red-500/60 text-red-500 hover:bg-red-500/10 justify-center"
@@ -2617,7 +1635,7 @@ export default function App(): JSX.Element {
                           <div className="absolute -top-1 -right-1 w-4 h-4 bg-yellow-500 rounded-full flex items-center justify-center shadow-sm">
                             <svg className="w-2.5 h-2.5 text-black" fill="currentColor" viewBox="0 0 24 24">
                               <path d="M12 8L15 13.2L18 10.5L17.3 14H6.7L6 10.5L9 13.2L12 8M12 4L8.5 10L3 5L5 16H19L21 5L15.5 10L12 4Z"/>
-                            </svg>
+                    </svg>
                     </div>
                   )}
                 </div>
@@ -2718,10 +1736,16 @@ export default function App(): JSX.Element {
           {playbackBlocked && (
             <div className="mb-4 rounded-md border border-yellow-500/40 bg-yellow-400/10 text-yellow-200 px-3 py-2 text-sm flex items-center justify-between">
               <span>Playback is blocked by your browser. Click to enable synced playback.</span>
-              <button onClick={unlockPlayback} className="ml-3 rounded bg-yellow-400 text-black px-2 py-1 text-xs font-medium">Enable</button>
+              <button onClick={unlockPlayback} className="ml-3 rounded bg-yellow-400 text-black px-2 py-1 text-xs font-medium" disabled={waitingForSync}>Enable</button>
             </div>
           )}
-
+          {waitingForSync && (
+            <div className="mb-4 rounded-md border border-blue-500/40 bg-blue-400/10 text-blue-200 px-3 py-2 text-sm flex items-center justify-between">
+              <span>Syncing with room... Please wait.</span>
+            </div>
+          )}
+          {/* Force Resync button only appears when there's a real sync issue */}
+          {/* Not just because the host is paused - that's normal behavior */}
 
           {/* Legacy single-toast placeholder removed; using stacked toasts now */}
           {error && inRoom && <div className="hidden"></div>}
@@ -3014,30 +2038,7 @@ export default function App(): JSX.Element {
                   src={currentTrack?.url}
                   onLoadedMetadata={onLoadedMetadata}
                   onTimeUpdate={onTimeUpdate}
-                  onEnded={() => {
-                    if (tracksRef.current.length === 0) {
-                      setIsPlaying(false)
-                      setCurrentTime(0)
-                      shouldAutoplayRef.current = false
-                      return
-                    }
-                    // Auto-advance: follow shuffle if enabled, else sequential next
-                    if (isShuffleRef.current) {
-                      const total = tracksRef.current.length
-                      if (total <= 1) {
-                        setIsPlaying(false)
-                        setCurrentTime(0)
-                        shouldAutoplayRef.current = false
-                        return
-                      }
-                      const from = currentIndexRef.current
-                      let nextIndex = Math.floor(Math.random() * (total - 1))
-                      if (nextIndex >= from) nextIndex += 1
-                      enqueueGlobalCommand('next', { fromIndex: from, nextIndex })
-                    } else {
-                      enqueueGlobalCommand('next', { fromIndex: currentIndexRef.current })
-                    }
-                  }}
+                  onEnded={onEnded}
                   className="hidden"
                   controls
                 />
@@ -3199,46 +2200,7 @@ export default function App(): JSX.Element {
               <div className="flex justify-end">
                 <button
                   className="btn-outline border-red-500/60 text-red-500 hover:bg-red-500/10"
-                  onClick={async () => {
-                    // Mark cancellation flag
-                    uploadCancelRef.current = true
-                    
-                    // Abort all active uploads
-                    activeXhrsRef.current.forEach(x => { 
-                      try { 
-                        x.abort() 
-                      } catch (error) {
-                        console.error('Error aborting upload:', error)
-                      } 
-                    })
-                    activeXhrsRef.current = []
-                    
-                    // Remove any successfully uploaded files from server
-                    try {
-                      const bucket = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'groovebox-music'
-                      const paths = [...uploadedPathsRef.current]
-                      uploadedPathsRef.current = []
-                      if (paths.length > 0 && supabase) {
-                        const chunkSize = 100
-                        for (let i = 0; i < paths.length; i += chunkSize) {
-                          const chunk = paths.slice(i, i + chunkSize)
-                          await supabase.storage.from(bucket).remove(chunk)
-                        }
-                      }
-                    } catch (error) {
-                      console.error('Error cleaning up uploaded files:', error)
-                    }
-
-                    // Clear any errors
-                    setError(null)
-                    
-                    // Reset UI state
-                    setIsUploading(false)
-                    setIsProgressOpen(false)
-                    setUploadProgress([])
-                    setTotalUploadSize(0)
-                    setTotalUploaded(0)
-                  }}
+                  onClick={cancelUpload}
                 >
                   Cancel Uploads
                 </button>
@@ -3247,6 +2209,7 @@ export default function App(): JSX.Element {
           </div>
         </div>
       )}
+      <GlobalTracker />
     </div>
   )
 }

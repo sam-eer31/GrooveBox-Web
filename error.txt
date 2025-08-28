@@ -1,0 +1,103 @@
+Uncaught (in promise) NotAllowedError: Permission denied.
+index-B1GtAncu.js:164 Wake lock acquired
+index-B1GtAncu.js:162   POST https://govqtazfkbqlgqqzuksx.supabase.co/storage/v1/object/groovebox-music/rooms/RW96D6/meta/listeners.json 400 (Bad Request)
+
+
+
+
+
+
+index-B1GtAncu.js:162   POST https://govqtazfkbqlgqqzuksx.supabase.co/storage/v1/object/groovebox-music/rooms/RW96D6/meta/now.json 400 (Bad Request)
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+a @ index-B1GtAncu.js:162
+Promise.then
+u @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+W0 @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+Kr @ index-B1GtAncu.js:162
+Gs @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+Kr @ index-B1GtAncu.js:162
+Ot @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+ze @ index-B1GtAncu.js:162
+uploadOrUpdate @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+ze @ index-B1GtAncu.js:162
+upload @ index-B1GtAncu.js:162
+Op @ index-B1GtAncu.js:164
+zo @ index-B1GtAncu.js:164
+await in zo
+Fu @ index-B1GtAncu.js:164
+await in Fu
+ut @ index-B1GtAncu.js:164
+onClick @ index-B1GtAncu.js:164
+Cm @ index-B1GtAncu.js:37
+Pm @ index-B1GtAncu.js:37
+Rm @ index-B1GtAncu.js:37
+Oc @ index-B1GtAncu.js:37
+qf @ index-B1GtAncu.js:37
+(anonymous) @ index-B1GtAncu.js:37
+vu @ index-B1GtAncu.js:40
+gf @ index-B1GtAncu.js:37
+la @ index-B1GtAncu.js:37
+Vl @ index-B1GtAncu.js:37
+Km @ index-B1GtAncu.js:37
+index-B1GtAncu.js:162   POST https://govqtazfkbqlgqqzuksx.supabase.co/storage/v1/object/groovebox-music/rooms/RW96D6/meta/history.json 400 (Bad Request)
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+a @ index-B1GtAncu.js:162
+Promise.then
+u @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+W0 @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+Kr @ index-B1GtAncu.js:162
+Gs @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+Kr @ index-B1GtAncu.js:162
+Ot @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+ze @ index-B1GtAncu.js:162
+uploadOrUpdate @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+(anonymous) @ index-B1GtAncu.js:162
+ze @ index-B1GtAncu.js:162
+upload @ index-B1GtAncu.js:162
+Op @ index-B1GtAncu.js:164
+await in Op
+zo @ index-B1GtAncu.js:164
+await in zo
+Fu @ index-B1GtAncu.js:164
+await in Fu
+ut @ index-B1GtAncu.js:164
+onClick @ index-B1GtAncu.js:164
+Cm @ index-B1GtAncu.js:37
+Pm @ index-B1GtAncu.js:37
+Rm @ index-B1GtAncu.js:37
+Oc @ index-B1GtAncu.js:37
+qf @ index-B1GtAncu.js:37
+(anonymous) @ index-B1GtAncu.js:37
+vu @ index-B1GtAncu.js:40
+gf @ index-B1GtAncu.js:37
+la @ index-B1GtAncu.js:37
+Vl @ index-B1GtAncu.js:37
+Km @ index-B1GtAncu.js:37
+index-B1GtAncu.js:162   POST https://govqtazfkbqlgqqzuksx.supabase.co/storage/v1/object/groovebox-music/rooms/RW96D6/meta/listeners.json 400 (Bad Request)

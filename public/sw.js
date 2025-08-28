@@ -59,9 +59,13 @@ self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'REGISTER_KEEP_ALIVE') {
     // Register periodic background sync
     if ('periodicSync' in self.registration) {
-      self.registration.periodicSync.register('groovebox-keep-alive', {
-        minInterval: KEEP_ALIVE_INTERVAL
-      });
+      try {
+        self.registration.periodicSync.register('groovebox-keep-alive', {
+          minInterval: KEEP_ALIVE_INTERVAL
+        });
+      } catch (e) {
+        console.warn('Periodic Sync registration failed:', e);
+      }
     }
     
     // Also set up a more aggressive interval
@@ -73,7 +77,11 @@ self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'UNREGISTER_KEEP_ALIVE') {
     // Unregister periodic background sync
     if ('periodicSync' in self.registration) {
-      self.registration.periodicSync.unregister('groovebox-keep-alive');
+      try {
+        self.registration.periodicSync.unregister('groovebox-keep-alive');
+      } catch (e) {
+        console.warn('Periodic Sync unregister failed:', e);
+      }
     }
   }
 });
